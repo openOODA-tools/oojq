@@ -1,0 +1,134 @@
+// # Joining Operators And Combining Their Sides
+//
+// Logline: Decides what a pipe, a comma, a word operator, or "//" feeds to its right hand side, and how the two answers are put back together.
+//
+// Setup: Pure, no capability needed. Nothing here evaluates anything, so this page can sit on either side of the evaluator.
+// Beats:
+//   1. A pipe feeds the left side in; a comma, and, and or hand the original input back.
+//   2. An alternative operator only passes on the values that were false or null.
+//   3. Keep the truthy side of an alternative, and pair up the two sides of and and or.
+
+import "filter/select_node.oo";
+import "filter/eval/eval_leaf.oo";
+import "filter/ast.oo";
+
+pub fn keeps(doc: JDoc, out: List[Int]) -> Bool {
+    let mut i: Int = 0;
+    while i < list_len(out) {
+        if truthy(jval_at(doc, list_get(out, i))) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+// A pipe consumes the left side. A comma, and, and or run the right side over
+// the same input. An alternative operator does too, but only when the left side
+// gave nothing truthy: fed an empty list instead, the right side is never
+// evaluated at all, which is how jq reads 1 // error("x") as 1 and not an
+// error. The right side runs over the original input rather than over the falsy
+// values on the left, so .a // .b on {"a":null,"b":1} is 1 and not null.
+pub fn side_input(kind: String, doc: JDoc, got: List[Int], input: List[Int]) -> List[Int] {
+    if kind == "comma" || kind == "and" || kind == "or" { return input; }
+    if kind != "alt" { return got; }
+    let mut i: Int = 0;
+    while i < list_len(got) {
+        if truthy(jval_at(doc, list_get(got, i))) { return list_new(); }
+        i = i + 1;
+    }
+    return input;
+}
+
+pub fn combine_sides(doc: JDoc, kind: String, left: List[Int], right: List[Int]) -> Result[SRes, String] {
+    if kind == "pipe" { return Ok(SRes { doc: doc, out: right }); }
+    if kind == "comma" { return Ok(SRes { doc: doc, out: concat_indices(left, right) }); }
+    if kind == "alt" {
+        let mut keep: List[Int] = list_new();
+        let mut i: Int = 0;
+        while i < list_len(left) {
+            if truthy(jval_at(doc, list_get(left, i))) { keep = list_push(keep, list_get(left, i)); }
+            i = i + 1;
+        }
+        return Ok(SRes { doc: doc, out: concat_indices(keep, right) });
+    }
+    let want: Bool = kind == "and";
+    let mut out: List[Int] = list_new();
+    // and and or are the only pair that mints a value, and minting grows the
+    // arena. Handing back the doc we were given would leave the new index
+    // pointing at an arena the renderer never sees, and the answer would vanish.
+    let mut live: JDoc = doc;
+    let mut i: Int = 0;
+    while i < list_len(left) {
+        let a: Bool = truthy(jval_at(doc, list_get(left, i)));
+        let mut j: Int = 0;
+        while j < list_len(right) {
+            let b: Bool = truthy(jval_at(doc, list_get(right, j)));
+            let answer: Bool = both(want, a, b);
+            let res: SRes = bool_result(live, answer);
+            live = res.doc;
+            out = concat_indices(out, res.out);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+fn both(want: Bool, a: Bool, b: Bool) -> Bool {
+    if want { return a && b; }
+    return a || b;
+}
+
+// One suffix applied to every value the term in front of it produced.
+pub fn apply_step(doc: JDoc, targets: List[Int], n: ANode) -> Result[SRes, String] {
+    let mut out: List[Int] = list_new();
+    let mut live: JDoc = doc;
+    let mut i: Int = 0;
+    while i < list_len(targets) {
+        let here: Int = list_get(targets, i);
+        let r: Result[SRes, String] = suffix_on(live, here, n);
+        match r {
+            Err(e) => { return Err(e); }
+            Ok(v) => { live = v.doc; out = concat_indices(out, v.out); }
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+// The four suffixes that reach into a value: what suffix_on reads below, and
+// what the evaluator hands to apply_step. Naming them once keeps the walk and
+// the read from drifting apart over a kind only one of them happens to handle.
+pub fn is_suffix(k: String) -> Bool {
+    return k == "field" || k == "index" || k == "slice" || k == "iterate";
+}
+
+// first and last are [f][0] and [f][-1] spelled as a collect, but jq means
+// limit(1; f) and limit(1; f | reverse) by them, and a limit over no values is
+// no values. The bounds are worked out here rather than asked of leaf_index,
+// because leaf_index cannot say an out of range subscript apart from an array
+// whose element really is null, and only the first of those two is empty.
+// It sits above suffix_on, which asks it of every first and last. A page that
+// calls a function it has not written yet builds from a warm cache and fails
+// from a cold one, which is the worst way for a build to be wrong.
+fn edge_index(doc: JDoc, here: Int, at: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, here);
+    if v.kind != "array" { return leaf_index(doc, here, at); }
+    let count: Int = list_len(v.kids);
+    let mut want: Int = 0;
+    if at < 0 { want = count + at; }
+    if at >= count || want < 0 { return Ok(SRes { doc: doc, out: list_new() }); }
+    return leaf_index(doc, here, at);
+}
+
+pub fn suffix_on(doc: JDoc, here: Int, n: ANode) -> Result[SRes, String] {
+    let lo: Int = n.ival;
+    let hi: Int = n.b;
+    let member: String = n.name;
+    if n.kind == "field" { return leaf_field(doc, here, member); }
+    if n.kind == "index" {
+        if member == "first" || member == "last" { return edge_index(doc, here, lo); }
+        return leaf_index(doc, here, lo);
+    }
+    if n.kind == "slice" { return leaf_slice(doc, here, lo, hi); }
+    return leaf_iterate(doc, here);
+}

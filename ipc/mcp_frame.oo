@@ -1,0 +1,154 @@
+// # MCP Frame Transport
+//
+// Logline: Separates one JSON-RPC message out of a stream that may arrive in arbitrary chunks.
+//
+// Setup: Pure, no capability needed. This page only measures and slices text; it never reads or writes.
+// Beats:
+//   1. A Content-Length header names the body in bytes, and the body is found by
+//      counting UTF-8 widths rather than characters, because the two disagree.
+//   2. A bare JSON value is a frame in its own right, which is what a client that
+//      sends newline delimited JSON relies on.
+//   3. A frame that is not complete yet reports -1, so the caller reads more rather
+//      than handing a half message to the parser.
+
+import "parse/anchor.oo";
+import "filter/syntax/scan/parse_span.oo";
+import "std/core/primitives/str.oo";
+
+// A header is a Content-Length line, then a blank line, then exactly that many
+// bytes of body. Returns the index the body starts at, or -1 when the buffer does
+// not hold a whole frame yet.
+pub fn mcp_body_start(buf: String) -> Int {
+    let n: Int = chars_len(buf);
+    let crlf: Int = index_of(buf, "\r\n\r\n");
+    let lf: Int = index_of(buf, "\n\n");
+    let mut sep: Int = 0 - 1;
+    let mut width: Int = 0;
+    if crlf >= 0 { sep = crlf; width = 4; }
+    if lf >= 0 && (sep < 0 || lf < crlf) { sep = lf; width = 2; }
+    if sep < 0 { return 0 - 1; }
+    let head: String = str_slice(buf, 0, sep);
+    if !starts_with(head, "Content-Length:") { return 0 - 1; }
+    return sep + width;
+}
+
+// Reads the declared byte count off the header line. A header with no number in
+// it is malformed rather than incomplete, so it reports -1 and the caller stops.
+pub fn mcp_want_bytes(buf: String) -> Int {
+    let sep: Int = index_of(buf, "\n");
+    if sep < 0 { return 0 - 1; }
+    let head: String = str_slice(buf, 0, sep);
+    if !starts_with(head, "Content-Length:") { return 0 - 1; }
+    let digits: String = trim_ws(str_slice(head, 15, chars_len(head)));
+    let got: Result[Int, String] = parse_int(digits);
+    match got {
+        Err(e) => { return 0 - 1; }
+        Ok(v) => { return v; }
+    }
+}
+
+// The body ends where its declared byte count runs out. The count is in bytes
+// and the buffer is walked in characters, so each character contributes its UTF-8
+// width. A buffer that is short reports -1 so the caller asks for more input
+// rather than dispatching a truncated request.
+pub fn mcp_body_end(buf: String, start: Int, want: Int) -> Int {
+    let n: Int = chars_len(buf);
+    let mut seen: Int = 0;
+    let mut i: Int = start;
+    while i < n {
+        let ch: String = char_at(buf, i);
+        seen = seen + utf8_width(byte_at(ch, 0) & 255);
+        if seen == want { return i + 1; }
+        if seen > want { return 0 - 1; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// Where the next bare JSON value starts, skipping the whitespace a newline
+// delimited client leaves between frames. Only the first non blank character
+// decides, because a buffer beginning with a newline still holds a whole frame
+// and looking at position zero alone would discard it.
+pub fn mcp_bare_start(buf: String) -> Int {
+    let n: Int = chars_len(buf);
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(buf, i);
+        if ch != " " && ch != "\n" && ch != "\r" && ch != "\t" {
+            if ch == "{" || ch == "[" { return i; }
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// A buffer holding only the newline that separated two bare JSON frames is not
+// a truncated message. Reporting it as one puts a spurious error in front of a
+// client that did nothing wrong.
+pub fn mcp_all_space(buf: String) -> Bool {
+    let n: Int = chars_len(buf);
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(buf, i);
+        if ch != " " && ch != "\n" && ch != "\r" && ch != "\t" { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Where a bare JSON value ends, by balancing brackets and stepping over the
+// strings so a brace inside one does not count. Returns -1 while the value is
+// still open, which is the normal case when the buffer holds half a message.
+pub fn mcp_bare_end(buf: String) -> Int {
+    let n: Int = chars_len(buf);
+    let mut depth: Int = 0;
+    let mut in_str: Bool = false;
+    let mut esc: Bool = false;
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(buf, i);
+        if in_str {
+            if esc { esc = false; }
+            else if ch == "\\" { esc = true; }
+            else if ch == "\"" { in_str = false; }
+        } else {
+            if ch == "\"" { in_str = true; }
+            else if ch == "{" || ch == "[" { depth = depth + 1; }
+            else if ch == "}" || ch == "]" {
+                depth = depth - 1;
+                if depth == 0 { return i + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// Builds a framed response. A bare JSON client gets the body and a newline,
+// which is the framing it sent.
+
+// Builds a framed response. A bare JSON client gets the body and a newline,
+// which is the framing it sent.
+pub fn mcp_frame_reply(body: String, framed: Bool) -> String {
+    if framed {
+        let count: Int = mcp_byte_len(body);
+        let digits: String = count.to_string();
+        return "Content-Length: " + digits + "\r\n\r\n" + body;
+    }
+    return body + "\n";
+}
+
+// The byte length of a string, which Content-Length needs and chars_len cannot
+// give. Every non ASCII character is worth its own UTF-8 width.
+pub fn mcp_byte_len(s: String) -> Int {
+    let n: Int = chars_len(s);
+    let mut total: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(s, i);
+        total = total + utf8_width(byte_at(ch, 0) & 255);
+        i = i + 1;
+    }
+    return total;
+}

@@ -1,0 +1,166 @@
+// # Render Value Stream As JSON Text
+//
+// Logline: Serialises the nodes a filter selected into JSON text.
+//
+// Setup: Pure, no capability needed. Reads the arena the parse domain built and
+// writes nothing; stdout framing is the caller's business.
+// Beats:
+//   1. Encode every node kind: null, bool, int, float, string, array, object.
+//   2. Emit compact output with no spaces, or jq's two space pretty form.
+//   3. Keep object member order as parsed, so two runs match byte for byte.
+//   4. Spell one node as text, which is what tostring and every @format need.
+
+import "render_string.oo";
+import "filter/select_node.oo";
+import "parse/anchor.oo";
+
+// jq's tostring, and the first half of every @format but @json. A string is its
+// own text, a scalar spells itself, and a container becomes the same compact
+// JSON the printer would write for it.
+// jq names a value inside an error message the way that value is written, so a
+// string keeps its quotes and a number does not gain any. render_as_text alone
+// is not enough for the first and this is the one place both are needed.
+pub fn shown_value(doc: JDoc, idx: Int) -> String {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "string" { return "\"" + render_string(v.sval) + "\""; }
+    return render_as_text(doc, idx);
+}
+
+// A refused operation names both sides: the kind jq calls it, then the value as
+// it is written. "null (null) and number (1) cannot be added" is one sentence
+// with five operators' worth of verb, so it is written once here and each
+// operator supplies only its own verb. Nothing is abbreviated: the two kinds
+// and the two values are what jq prints, so a diff against it is a real one.
+pub fn cannot_pair(doc: JDoc, x: Int, y: Int, verb: String) -> String {
+    let a: JVal = jval_at(doc, x);
+    let b: JVal = jval_at(doc, y);
+    return kind_word(a.kind) + " (" + shown_value(doc, x) + ") and "
+        + kind_word(b.kind) + " (" + shown_value(doc, y) + ") cannot be " + verb;
+}
+
+pub fn render_as_text(doc: JDoc, idx: Int) -> String {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "string" { return v.sval; }
+    if v.kind == "int" { return v.ival.to_string(); }
+    if v.kind == "float" { return v.sval; }
+    if v.kind == "null" { return "null"; }
+    if v.kind == "bool" { if v.bval { return "true"; } return "false"; }
+    return render_stream(doc, one(idx), true);
+}
+
+pub fn render_indent(depth: Int) -> String {
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < depth {
+        out = out + "  ";
+        i = i + 1;
+    }
+    return out;
+}
+
+fn is_scalar(k: String) -> Bool {
+    return k == "int" || k == "float" || k == "string" || k == "bool" || k == "null";
+}
+
+pub fn render_node(doc: JDoc, idx: Int, depth: Int, compact: Bool) -> String {
+    let v: JVal = jval_at(doc, idx);
+    let k: String = v.kind;
+    if k == "null" { return "null"; }
+    if k == "bool" {
+        if v.bval { return "true"; }
+        return "false";
+    }
+    if k == "int" { return v.ival.to_string(); }
+    if k == "float" { return v.sval; }
+    if k == "string" { return "\"" + render_string(v.sval) + "\""; }
+    let kids: List[Int] = v.kids;
+    let keys: List[String] = v.keys;
+    if k == "array" {
+        if list_len(kids) == 0 { return "[]"; }
+        if compact {
+            let mut out: String = "[";
+            let mut i: Int = 0;
+            while i < list_len(kids) {
+                if i > 0 { out = out + ","; }
+                out = out + render_node(doc, list_get(kids, i), depth + 1, compact);
+                i = i + 1;
+            }
+            return out + "]";
+        }
+        let mut out: String = "[\n";
+        let mut i: Int = 0;
+        while i < list_len(kids) {
+            if i > 0 { out = out + ",\n"; }
+            out = out + render_indent(depth + 1)
+                + render_node(doc, list_get(kids, i), depth + 1, compact);
+            i = i + 1;
+        }
+        return out + "\n" + render_indent(depth) + "]";
+    }
+    if k == "object" {
+        if list_len(keys) == 0 { return "{}"; }
+        if compact {
+            let mut out: String = "{";
+            let mut i: Int = 0;
+            while i < list_len(keys) {
+                if i > 0 { out = out + ","; }
+                out = out + "\"" + render_string(list_get(keys, i)) + "\":"
+                    + render_node(doc, list_get(kids, i), depth + 1, compact);
+                i = i + 1;
+            }
+            return out + "}";
+        }
+        let mut out: String = "{\n";
+        let mut i: Int = 0;
+        while i < list_len(keys) {
+            if i > 0 { out = out + ",\n"; }
+            out = out + render_indent(depth + 1) + "\""
+                + render_string(list_get(keys, i)) + "\": "
+                + render_node(doc, list_get(kids, i), depth + 1, compact);
+            i = i + 1;
+        }
+        return out + "\n" + render_indent(depth) + "}";
+    }
+    return "null";
+}
+
+// One result per line, matching how jq prints a stream. The trailing newline is
+// the caller's choice, so this returns the joined text without one.
+pub fn render_stream(doc: JDoc, roots: List[Int], compact: Bool) -> String {
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < list_len(roots) {
+        if i > 0 { out = out + "\n"; }
+        out = out + render_node(doc, list_get(roots, i), 0, compact);
+        i = i + 1;
+    }
+    return out;
+}
+
+// What -r changes is one kind and one kind only: a top level string is written
+// as its own text rather than as a JSON string. Everything else is left exactly
+// as the printer would have written it, a number as a number, null as null, and
+// a container as the same JSON in the same spacing. That is the whole of jq's
+// raw output, and it is why `"a\nb" | -r` spans two lines: the value is one
+// string and the escape that would have kept it on one is not written.
+pub fn render_raw_stream(doc: JDoc, roots: List[Int], compact: Bool) -> String {
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < list_len(roots) {
+        if i > 0 { out = out + "\n"; }
+        let at: Int = list_get(roots, i);
+        let v: JVal = jval_at(doc, at);
+        if v.kind == "string" {
+            out = out + v.sval;
+        } else {
+            out = out + render_node(doc, at, 0, compact);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn render_node_is_scalar(doc: JDoc, idx: Int) -> Bool {
+    let v: JVal = jval_at(doc, idx);
+    return is_scalar(v.kind);
+}

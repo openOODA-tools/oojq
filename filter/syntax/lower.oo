@@ -1,0 +1,255 @@
+// # Lowering A Call Into Nodes While The Filter Is Read
+//
+// Logline: Rewrites the calls that are only a different spelling of steps the evaluator already has.
+//
+// Setup: Pure, no capability needed. Every node here is fixed before a single value is read, which is why a limit count has to be written in the filter rather than computed.
+// Beats:
+//   1. first(f) is [f][0] and last(f) is [f][-1], the same two steps in a different order.
+//   2. limit(n; f) is [f][0:n][], the same two steps with a run instead of one value.
+//   3. with_entries(f) is to_entries | map(f) | from_entries, so it needs no rule of its own at all.
+
+import "filter/ast.oo";
+import "filter/syntax/parse_path.oo";
+import "filter/syntax/scan/parse_lit.oo";
+import "filter/builtin/builtin_range.oo";
+import "std/core/primitives/str.oo";
+
+// first(f) is [f][0] and last(f) is [f][-1] and limit(n; f) is [f][0:n][]. All
+// three are the same two steps: collect the body, then take part of what the
+// collect holds. Rewriting the call here is what keeps the evaluator from
+// needing a second shape of member walk, because a collect already walks the
+// body, an index already reads one value out of the array, and a slice already
+// takes a run, so every part of all three was paid for elsewhere.
+pub fn pick_by_index(c: Cur, t: Tok, added: ARes, name: String) -> Result[POut, String] {
+    if name == "with_entries" { return rewrite_entries(c, t, added); }
+    if name == "setpath" { return rewrite_setpath(c, t, added); }
+    if name != "first" && name != "last" && name != "limit" {
+        return Ok(POut { ast: added.ast, cur: Cur { src: c.src, pos: t.pos }, node: added.idx });
+    }
+    let mut body: String = ast_at(added.ast, added.idx).sval;
+    let mut upto: Int = 0;
+    if name == "limit" {
+        // The count has to be a literal. A slice bound is a node field fixed
+        // while the filter is read, so a count only known at run time cannot be
+        // built here. Running the body without one would answer with every value
+        // it produced, which is the wrong answer and a plausible one, so the
+        // count is refused by name instead.
+        let parts: List[String] = range_parts(body);
+        if list_len(parts) != 2 {
+            return Err("limit needs a count and a filter, as in limit(3; .items[])");
+        }
+        let digits: String = list_get(parts, 0);
+        let counted: Result[Int, String] = parse_int(digits);
+        match counted {
+            Err(e) => { return Err("the count in limit must be digits written in the filter, not \"" + digits + "\""); }
+            Ok(k) => { if k < 0 { return Err("the count in limit cannot be negative, it is " + digits); } upto = k; }
+        }
+        body = list_get(parts, 1);
+    }
+    let mut col: ANode = node_blank("collect");
+    col.sval = body;
+    let add1: ARes = ast_add(added.ast, col);
+    if name == "limit" {
+        // [0:n] then [] is what makes this a limit and not a slice. The slice
+        // answers one array, and the iterate over it is what puts the values
+        // back on the stream one at a time, which is how limit keeps yielding
+        // instead of answering once.
+        let sl: ANode = n_slice(0, upto, add1.idx);
+        let add2: ARes = ast_add(add1.ast, sl);
+        let it: ANode = n_iterate(add2.idx);
+        let add3: ARes = ast_add(add2.ast, it);
+        return Ok(POut { ast: add3.ast, cur: Cur { src: c.src, pos: t.pos }, node: add3.idx });
+    }
+    let mut here: Int = 0;
+    if name == "last" { here = 0 - 1; }
+    let mut idx: ANode = n_index(here, add1.idx);
+    // The name is what tells the run that this index is a first or a last
+    // rather than an ordinary subscript. jq means limit(1; f) by first, not
+    // element zero of a collect, so an empty collect has to yield no value at
+    // all rather than the null that subscripting an empty array gives. A plain
+    // index keeps the null, because [] | .[0] really is null in jq.
+    idx.name = name;
+    let add2: ARes = ast_add(add1.ast, idx);
+    return Ok(POut { ast: add2.ast, cur: Cur { src: c.src, pos: t.pos }, node: add2.idx });
+}
+
+// with_entries(f) is to_entries | map(f) | from_entries, and that is not a
+// resemblance: checked against jq 1.8.1 on a value update, a key update, and a
+// select, the two spellings are byte identical, and an array answers the same
+// "Cannot use number (0) as object key" refusal through both, because the index
+// is a number and from_entries will not make it a name.
+//
+// All three parts were already paid for, so this costs the evaluator nothing. The
+// call node built for with_entries is left in the tree unreferenced, the same
+// way the collect built for first and last is.
+// The left side of an update has to be a path, and the only path this build can
+// read is a literal one. The steps are read back out of the tree the parser has
+// already built, walking down from the outside in and writing the result in the
+// order they were written, which is the reverse of the walk: .a.b[0] is a field
+// node holding another field node holding an index, and the index is the step
+// that comes first.
+//
+// A name that cannot be written inside a JSON string without escaping is refused
+// by name rather than escaped by hand, because a name that came out as a
+// different name is a wrong answer.
+fn writable_name(nm: String) -> Bool {
+    if chars_len(nm) == 0 { return false; }
+    let n: Int = chars_len(nm);
+    let mut i: Int = 0;
+    let mut ok: Bool = true;
+    while i < n && ok {
+        let c: String = char_at(nm, i);
+        if c == "\"" || c == "\\" { ok = false; }
+        i = i + 1;
+    }
+    return ok;
+}
+
+// A path in parentheses is still a path: jq reads (.a) = 7 as the same
+// assignment as .a = 7. The tree keeps the interior as text, so the reader that
+// already reads literal paths reads this one, differing only by the letter
+// parse_path puts in front of each step. They come back backwards, because
+// path_text walks from the outside in and turns the list over at the end.
+fn paren_steps(ast: AList, node: Int) -> Result[List[String], String] {
+    let n: ANode = ast_at(ast, node);
+    let got: Result[List[String], String] = literal_path(trim_ws(n.sval));
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(parts) => {
+            let mut out: List[String] = list_new();
+            let mut i: Int = list_len(parts) - 1;
+            while i >= 0 {
+                let s: String = list_get(parts, i);
+                let body: String = str_slice(s, 2, chars_len(s));
+                if char_at(s, 0) == "s" {
+                    if !writable_name(body) { return Err("an update cannot write the name \"" + body + "\""); }
+                    out = list_push(out, "\"" + body + "\"");
+                } else {
+                    out = list_push(out, body);
+                }
+                i = i - 1;
+            }
+            return Ok(out);
+        }
+    }
+}
+
+fn path_text(ast: AList, node: Int) -> Result[String, String] {
+    let mut steps: List[String] = list_new();
+    let mut at: Int = node;
+    let mut go: Bool = true;
+    while go {
+        let n: ANode = ast_at(ast, at);
+        if n.kind == "ident" { go = false; }
+        else if n.kind == "field" {
+            let nm: String = n.name;
+            if !writable_name(nm) { return Err("an update cannot write the name \"" + nm + "\""); }
+            steps = list_push(steps, "\"" + nm + "\"");
+            at = n.a;
+        }
+        else if n.kind == "index" {
+            if chars_len(n.name) > 0 { return Err("first and last are not a path an update can write"); }
+            steps = list_push(steps, n.ival.to_string());
+            at = n.a;
+        }
+        else if n.kind == "paren" {
+            let sub: Result[List[String], String] = paren_steps(ast, at);
+            match sub {
+                Err(e) => { return Err(e); }
+                Ok(ps) => {
+                    let mut i: Int = 0;
+                    while i < list_len(ps) {
+                        steps = list_push(steps, list_get(ps, i));
+                        i = i + 1;
+                    }
+                    go = false;
+                }
+            }
+        }
+        else { return Err("the left of an update has to be a path, and " + n.kind + " is not one"); }
+    }
+    let mut body: String = "[";
+    let mut last: Int = list_len(steps) - 1;
+    let mut i: Int = last;
+    while i >= 0 {
+        if i < last { body = body + ","; }
+        body = body + list_get(steps, i);
+        i = i - 1;
+    }
+    return Ok(body + "]");
+}
+
+// The three update families, each written as the call the run already knows how
+// to answer: a set is setpath, an update is getpath and a set, and the one
+// branch that is neither is the cut that |= does when its body answers nothing.
+// The choice between the two update names is the measured one; see
+// path/update.oo and AGENTS.md.
+//
+// The right hand side is taken as the text between where it began and where the
+// parse stopped, not from where the left hand side ended: the operator sits
+// between them, so slicing from the left writes the body as "[= 7]". start is
+// the position just past the operator, the only place the right hand side can
+// begin. The operator is carried by the name and not by the body: writing `+=`
+// inside the body hands the evaluator a second update to parse.
+pub fn rewrite_update(c: Cur, acc: POut, op: String, rhs: POut, start: Int) -> Result[POut, String] {
+    let got: Result[String, String] = path_text(acc.ast, acc.node);
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(p) => {
+            let value: String = trim_ws(str_slice(c.src, start, rhs.cur.pos));
+            // += is + with a name attached; the body wants the bare operator.
+            let arith: String = str_slice(op, 0, chars_len(op) - 1);
+            let mut made: ANode = node_blank("func");
+            if op == "=" {
+                made.name = "__sp";
+                made.sval = "[[" + p + "],[" + value + "]]";
+            }
+            else if op == "|=" {
+                made.name = "__upd0";
+                made.sval = "[[" + p + "],[getpath(" + p + ") | " + value + "]]";
+            }
+            else {
+                made.name = "__upd1";
+                made.sval = "[[" + p + "],[getpath(" + p + ") " + arith + " " + value + "]]";
+            }
+            let add: ARes = ast_add(acc.ast, made);
+            return Ok(POut { ast: add.ast, cur: rhs.cur, node: add.idx });
+        }
+    }
+}
+
+fn rewrite_entries(c: Cur, t: Tok, added: ARes) -> Result[POut, String] {
+    let body: String = ast_at(added.ast, added.idx).sval;
+    let a1: ARes = ast_add(added.ast, n_func("to_entries"));
+    let mut mapped: ANode = n_func("map");
+    mapped.sval = body;
+    let a2: ARes = ast_add(a1.ast, mapped);
+    let a3: ARes = ast_add(a2.ast, n_pair("pipe", a1.idx, a2.idx));
+    let a4: ARes = ast_add(a3.ast, n_func("from_entries"));
+    let a5: ARes = ast_add(a4.ast, n_pair("pipe", a3.idx, a4.idx));
+    return Ok(POut { ast: a5.ast, cur: Cur { src: c.src, pos: t.pos }, node: a5.idx });
+}
+
+// setpath(P; v) needs both sides read, and a call carries one body. Gathering
+// each side into its own array gives the run both in a single answer: the body
+// becomes [[P], [v]], so the builtin sees the paths on the left and the values
+// on the right without the evaluator ever splitting an argument. Either side may
+// answer more than once and the two multiply, which is why the two gathers and
+// not one are what is written here.
+//
+// A path or a value written as a generator is therefore answered for, and one
+// that answers nothing is the whole answer being nothing. The cost is one hub
+// line: the call reaches the same tail every other filter argument reaches, and
+// the run names it the way it names getpath.
+fn rewrite_setpath(c: Cur, t: Tok, added: ARes) -> Result[POut, String] {
+    let body: String = ast_at(added.ast, added.idx).sval;
+    let parts: List[String] = range_parts(body);
+    let argc: Int = list_len(parts);
+    if argc != 2 {
+        return Err("setpath/" + argc.to_string() + " is not defined: setpath takes a path and a value, as in setpath([\"a\"]; .b)");
+    }
+    let mut n: ANode = n_func("__sp");
+    n.sval = "[[" + list_get(parts, 0) + "],[" + list_get(parts, 1) + "]]";
+    let a1: ARes = ast_add(added.ast, n);
+    return Ok(POut { ast: a1.ast, cur: Cur { src: c.src, pos: t.pos }, node: a1.idx });
+}

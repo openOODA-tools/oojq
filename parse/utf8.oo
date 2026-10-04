@@ -1,0 +1,96 @@
+// # UTF-8 Encoding Helpers
+//
+// Logline: Turns a code point into the bytes that spell it, and reads the code point back out of one character.
+//
+// Setup: Pure, no capability needed. These live at the bottom of the tree because both the JSON reader and the string builtins need them, and a second copy would be a second answer to the same question.
+//
+// Beats:
+//   1. Read a code point from one character by following the continuation bytes its leading byte promises.
+//   2. Write a code point out in the width its value needs, from one byte to four.
+//   3. Copy a character through byte for byte when it is already encoded.
+
+// The width follows from the leading byte, which is the only part of a UTF-8
+// sequence that says how long the sequence is.
+pub fn utf8_width(lead: Int) -> Int {
+    if lead < 128 { return 1; }
+    if lead < 224 { return 2; }
+    if lead < 240 { return 3; }
+    return 4;
+}
+
+pub fn push_utf8(buf: List[Int], c: Int) -> List[Int] {
+    let mut out: List[Int] = buf;
+    if c < 128 { return bytes_push(out, c); }
+    if c < 2048 {
+        out = bytes_push(out, 192 + c / 64);
+        return bytes_push(out, 128 + c % 64);
+    }
+    if c < 65536 {
+        out = bytes_push(out, 224 + c / 4096);
+        out = bytes_push(out, 128 + (c / 64) % 64);
+        return bytes_push(out, 128 + c % 64);
+    }
+    out = bytes_push(out, 240 + c / 262144);
+    out = bytes_push(out, 128 + (c / 4096) % 64);
+    out = bytes_push(out, 128 + (c / 64) % 64);
+    return bytes_push(out, 128 + c % 64);
+}
+
+pub fn utf8_code(ch: String) -> Int {
+    let b0: Int = byte_at(ch, 0) & 255;
+    if b0 < 128 { return b0; }
+    if b0 < 224 {
+        let b1: Int = byte_at(ch, 1) & 255;
+        return (b0 - 192) * 64 + (b1 - 128);
+    }
+    if b0 < 240 {
+        let b1: Int = byte_at(ch, 1) & 255;
+        let b2: Int = byte_at(ch, 2) & 255;
+        return (b0 - 224) * 4096 + (b1 - 128) * 64 + (b2 - 128);
+    }
+    let b1: Int = byte_at(ch, 1) & 255;
+    let b2: Int = byte_at(ch, 2) & 255;
+    let b3: Int = byte_at(ch, 3) & 255;
+    return (b0 - 240) * 262144 + (b1 - 128) * 4096 + (b2 - 128) * 64 + (b3 - 128);
+}
+
+pub fn push_utf8_char(buf: List[Int], ch: String) -> List[Int] {
+    let mut out: List[Int] = buf;
+    let mut k: Int = 0;
+    let w: Int = utf8_width(byte_at(ch, 0) & 255);
+    while k < w {
+        out = bytes_push(out, byte_at(ch, k) & 255);
+        k = k + 1;
+    }
+    return out;
+}
+
+// The length of a well-formed UTF-8 sequence that starts at i, or 0 when what is
+// there is not one. C0 and C1 are left out of the two byte range on purpose:
+// they could only ever spell an overlong form of a character that ASCII already
+// has. The four leads that need a narrower continuation byte are the other half
+// of the rule, because a lead on its own would read either an overlong form, a
+// surrogate, or a value past U+10FFFF, and each of those is a different
+// character than the bytes claim to be.
+pub fn utf8_seq_len(buf: List[Int], i: Int) -> Int {
+    if i < 0 || i >= list_len(buf) { return 0; }
+    let b0: Int = list_get(buf, i);
+    if b0 < 128 { return 1; }
+    let mut w: Int = 0;
+    if b0 >= 194 && b0 <= 223 { w = 2; }
+    if b0 >= 224 && b0 <= 239 { w = 3; }
+    if b0 >= 240 && b0 <= 244 { w = 4; }
+    if w == 0 { return 0; }
+    if i + w > list_len(buf) { return 0; }
+    let mut k: Int = 1;
+    while k < w {
+        let b: Int = list_get(buf, i + k);
+        if b < 128 || b > 191 { return 0; }
+        if k == 1 && b0 == 224 && b < 160 { return 0; }
+        if k == 1 && b0 == 240 && b < 144 { return 0; }
+        if k == 1 && b0 == 244 && b > 143 { return 0; }
+        if k == 1 && b0 == 237 && b > 159 { return 0; }
+        k = k + 1;
+    }
+    return w;
+}

@@ -1,0 +1,239 @@
+// # Text And Code Point Conversions
+//
+// Logline: Turns a value into JSON text and back, into the characters of a string and back, and into the pieces a separator divides it by.
+//
+// Setup: Pure, no capability needed, apart from reusing the one renderer and the one JSON reader the tree already has so neither can drift.
+// Beats:
+//   1. Round trip a value through the same writer the CLI prints with, so tojson can never disagree with the output.
+//   2. Read a string as UTF-8 code points rather than bytes, and split it on a literal separator.
+//   3. Find a substring by character index, and trim one from either end.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "render/render_value.oo";
+import "std/core/primitives/str.oo";
+
+pub fn builtin_explode(doc: JDoc, idx: Int) -> Result[SRes, String] {    let v: JVal = jval_at(doc, idx);
+    if v.kind != "string" { return Err("explode needs a string, not a " + v.kind); }
+    let text: String = v.sval;
+    let total: Int = chars_len(text);
+    let mut live: JDoc = doc;
+    let mut kids: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < total {
+        let ch: String = char_at(text, i);
+        let code: Int = utf8_code(ch);
+        let node: JVal = jval_int(code);
+        let p: PRes = jdoc_push(live, node);
+        live = p.doc;
+        kids = list_push(kids, p.idx);
+        i = i + 1;
+    }
+    let made: SRes = array_result(live, kids);
+    return Ok(made);
+}
+
+// utf8bytelength counts bytes, not characters, so "héllo" is 6 and not 5. It
+// walks the string the way explode does and adds up what each character takes,
+// which is the same rule chr writes them by. Anything that is not a string is
+// refused and named, because a byte length of a number is not zero.
+pub fn builtin_utf8bytelength(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "string" {
+        return Err(kind_word(v.kind) + " (" + shown_value(doc, idx) + ") only strings have UTF-8 byte length");
+    }
+    let text: String = v.sval;
+    let total: Int = chars_len(text);
+    let mut size: Int = 0;
+    let mut i: Int = 0;
+    while i < total {
+        size = size + codepoint_width(utf8_code(char_at(text, i)));
+        i = i + 1;
+    }
+    return Ok(int_result(doc, size));
+}
+
+// Named for a codepoint on purpose: parse/utf8.oo already has a utf8_width,
+// and that one reads the first BYTE of a character, not the character. Two
+// pages answering to the same name is a silent mis-dispatch, and it made "héllo"
+// seven bytes long until this was spelled apart.
+fn codepoint_width(cp: Int) -> Int {
+    if cp < 128 { return 1; }
+    if cp < 2048 { return 2; }
+    if cp < 65536 { return 3; }
+    return 4;
+}
+
+pub fn builtin_implode(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" { return Err("implode needs an array, not a " + v.kind); }
+    let kids: List[Int] = v.kids;
+    let mut buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < list_len(kids) {
+        let c: JVal = jval_at(doc, list_get(kids, i));
+        if c.kind != "int" { return Err("implode needs an array of whole numbers"); }
+        buf = push_utf8(buf, c.ival);
+        i = i + 1;
+    }
+    let text: String = bytes_to_str(buf);
+    let made: SRes = str_result(doc, text);
+    return Ok(made);
+}
+
+pub fn builtin_tojson(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let text: String = render_stream(doc, one(idx), true);
+    let made: SRes = str_result(doc, text);
+    return Ok(made);
+}
+
+// A parsed document is an arena of its own, and a step that hands back a
+// different one strands every index the caller already holds: the collect
+// [f] threads one arena through its loop, so the first member that swapped it
+// left the ones before it pointing into a document nobody renders, and
+// [.items[]|tojson|fromjson] answered nothing at all. The tree is copied into
+// the arena the caller keeps instead, node by node.
+fn copy_into(live: JDoc, src: JDoc, at: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(src, at);
+    let k: String = v.kind;
+    if k != "array" && k != "object" {
+        let p: PRes = jdoc_push(live, v);
+        return Ok(SRes { doc: p.doc, out: one(p.idx) });
+    }
+    let mut grown: JDoc = live;
+    let mut kids: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(v.kids) {
+        match copy_into(grown, src, list_get(v.kids, i)) {
+            Err(e) => { return Err(e); }
+            Ok(z) => { grown = z.doc; kids = concat_indices(kids, z.out); }
+        }
+        i = i + 1;
+    }
+    if k == "array" {
+        let p: PRes = jdoc_push(grown, jval_array(kids));
+        return Ok(SRes { doc: p.doc, out: one(p.idx) });
+    }
+    let p: PRes = jdoc_push(grown, jval_object(v.keys, kids));
+    return Ok(SRes { doc: p.doc, out: one(p.idx) });
+}
+
+pub fn builtin_fromjson(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "string" { return Err("fromjson needs a string, not a " + v.kind); }
+    let text: String = v.sval;
+    let got: Result[JDoc, String] = parse_document(text);
+    match got {
+        Err(e) => { return Err("fromjson: " + e); }
+        Ok(parsed) => {
+            let root: Int = parsed.root;
+            return copy_into(doc, parsed, root);
+        }
+    }
+}
+
+// One pass finds either end. The last match is kept aside while the scan
+// continues, so rindex is the same walk rather than a second one.
+fn find_sub(hay: String, needle: String, last: Bool) -> Int {
+    let total: Int = chars_len(hay);
+    let width: Int = chars_len(needle);
+    if width == 0 || width > total { return 0 - 1; }
+    let mut found: Int = 0 - 1;
+    let mut at: Int = 0;
+    while at + width <= total {
+        let piece: String = str_sub(hay, at, at + width);
+        if piece == needle {
+            if last {
+                found = at;
+            } else {
+                return at;
+            }
+        }
+        at = at + 1;
+    }
+    return found;
+}
+
+fn find_or_null(doc: JDoc, idx: Int, needle: String, last: Bool, named: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "string" { return Err("\"" + named + "\" needs a string, not a " + v.kind); }
+    let at: Int = find_sub(v.sval, needle, last);
+    if at < 0 { return Ok(null_result(doc)); }
+    let made: SRes = int_result(doc, at);
+    return Ok(made);
+}
+
+pub fn builtin_index(doc: JDoc, idx: Int, needle: String) -> Result[SRes, String] {
+    return find_or_null(doc, idx, needle, false, "index");
+}
+
+pub fn builtin_rindex(doc: JDoc, idx: Int, needle: String) -> Result[SRes, String] {
+    return find_or_null(doc, idx, needle, true, "rindex");
+}
+
+// A separator that is not there leaves the whole string as the one part, and an
+// empty separator splits between every character, which falls out of the loop
+// below without a special case.
+fn split_into(doc: JDoc, idx: Int, sep: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "string" { return Err("split needs a string, not a " + v.kind); }
+    let text: String = v.sval;
+    let width: Int = chars_len(sep);
+    let total: Int = chars_len(text);
+    let mut live: JDoc = doc;
+    let mut kids: List[Int] = list_new();
+    let mut at: Int = 0;
+    // An empty separator is a boundary at every position, which is what jq
+    // means by it, and the walk below would otherwise never move.
+    if width == 0 {
+        while at < total {
+            let piece: String = char_at(text, at);
+            let node: JVal = jval_string(piece);
+            let p: PRes = jdoc_push(live, node);
+            live = p.doc;
+            kids = list_push(kids, p.idx);
+            at = at + 1;
+        }
+        let made: SRes = array_result(live, kids);
+        return Ok(made);
+    }
+    let mut start: Int = 0;
+    while at < total {
+        let hit: Bool = width > 0 && at + width <= total && str_sub(text, at, at + width) == sep;
+        if hit {
+            let piece: String = str_sub(text, start, at);
+            let node: JVal = jval_string(piece);
+            let p: PRes = jdoc_push(live, node);
+            live = p.doc;
+            kids = list_push(kids, p.idx);
+            at = at + width;
+            start = at;
+        } else {
+            at = at + 1;
+        }
+    }
+    let rest: String = str_sub(text, start, total);
+    let last: JVal = jval_string(rest);
+    let q: PRes = jdoc_push(live, last);
+    live = q.doc;
+    kids = list_push(kids, q.idx);
+    let made: SRes = array_result(live, kids);
+    return Ok(made);
+}
+
+pub fn builtin_split(doc: JDoc, idx: Int, sep: String) -> Result[SRes, String] {
+    return split_into(doc, idx, sep);
+}
+
+pub fn builtin_rtrimstr(doc: JDoc, idx: Int, suf: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "string" { return Err("rtrimstr needs a string, not a " + v.kind); }
+    let text: String = v.sval;
+    let width: Int = chars_len(suf);
+    let total: Int = chars_len(text);
+    if width == 0 || width > total { return Ok(str_result(doc, text)); }
+    if str_sub(text, total - width, total) != suf { return Ok(str_result(doc, text)); }
+    let kept: String = str_sub(text, 0, total - width);
+    let made: SRes = str_result(doc, kept);
+    return Ok(made);
+}

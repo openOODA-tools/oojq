@@ -1,0 +1,95 @@
+// # Builtins That Order By A Key
+//
+// Logline: Answers the builtins that read a key off every member and then order, group, or pick from what the keys say.
+//
+// Setup: Pure, no capability needed. The key is already a node index by the time it arrives, so this page parses and evaluates nothing itself.
+// Beats:
+//   1. Name the builtins that iterate members, and the ones among them that order by a key.
+//   2. Turn each run of equal keys into one array, which is the answer group_by wants.
+//   3. Hand back the elements, the first of each distinct key, or the single end of the run.
+
+import "filter/run/eval_sort.oo";
+
+// The five builtins below collect the same element and key pair, so they differ
+// only in what they do with the sorted run they are handed.
+pub fn is_by_key(mode: String) -> Bool {
+    return mode == "group_by" || mode == "sort_by" || mode == "unique_by"
+        || mode == "min_by" || mode == "max_by";
+}
+
+pub fn is_member_builtin(name: String) -> Bool {
+    if is_by_key(name) { return true; }
+    return name == "map" || name == "select" || name == "any" || name == "all";
+}
+
+// any and all are the two here that are also a filter all on their own. jq
+// reads a bare any as any(.[]), which is a test of each member for truth and
+// nothing else, so "." is the body that asks exactly that question. The other
+// four have no meaning without a condition, and are still refused.
+pub fn bare_member(name: String) -> Bool {
+    return name == "any" || name == "all";
+}
+
+pub fn member_body(body: String, name: String) -> String {
+    if chars_len(body) > 0 { return body; }
+    if bare_member(name) { return "."; }
+    return body;
+}
+
+// Every run of equal keys becomes one array, and the runs become one array.
+fn group_answer(doc: JDoc, g: GSort) -> SRes {
+    let sorted: GSort = gs_sorted(doc, g);
+    let runs: List[List[Int]] = group_runs(doc, sorted);
+    let mut live: JDoc = doc;
+    let mut groups: List[Int] = list_new();
+    let mut w: Int = 0;
+    while w < list_len(runs) {
+        let made: SRes = array_result(live, list_get(runs, w));
+        live = made.doc;
+        let got: List[Int] = made.out;
+        groups = list_push(groups, list_get(got, 0));
+        w = w + 1;
+    }
+    let wrapped: SRes = array_result(live, groups);
+    return wrapped;
+}
+
+// sort_by hands back every element in key order, and unique_by hands back one
+// element per distinct key. min_by and max_by hand back the end of the run, and
+// an empty run is null rather than nothing, which is what jq writes.
+fn by_key_answer(doc: JDoc, g: GSort, mode: String) -> SRes {
+    if mode == "group_by" { return group_answer(doc, g); }
+    let sorted: GSort = gs_sorted(doc, g);
+    let run: List[Int] = sorted.idx;
+    let keys: List[Int] = sorted.keys;
+    let count: Int = list_len(run);
+    if mode == "min_by" {
+        if count == 0 { return null_result(doc); }
+        return SRes { doc: doc, out: one(list_get(run, 0)) };
+    }
+    if mode == "max_by" {
+        if count == 0 { return null_result(doc); }
+        return SRes { doc: doc, out: one(list_get(run, count - 1)) };
+    }
+    let mut keep: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < count {
+        if mode == "sort_by" {
+            keep = list_push(keep, list_get(run, i));
+        } else {
+            if i == 0 { keep = list_push(keep, list_get(run, i)); }
+            else {
+                let a: Int = list_get(keys, i - 1);
+                let b: Int = list_get(keys, i);
+                if compare_values(doc, a, b) != 0 { keep = list_push(keep, list_get(run, i)); }
+            }
+        }
+        i = i + 1;
+    }
+    let made: SRes = array_result(doc, keep);
+    return made;
+}
+
+pub fn answer_by_key(doc: JDoc, g: GSort, mode: String) -> SRes {
+    return by_key_answer(doc, g, mode);
+}

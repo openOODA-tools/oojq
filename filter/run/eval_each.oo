@@ -1,0 +1,44 @@
+// # One Empty Array Per Input Value
+//
+// Logline: Answers the empty collect with one empty array for every value that reached it, and answers nothing at all when nothing reached it.
+//
+// Setup: Pure, no capability needed. It only mints arrays, so it needs the arena and nothing from the evaluator that calls it.
+// Beats:
+//   1. Mint one empty array per input value, which is what a collect over an empty body means.
+//   2. Mint nothing for an empty stream, so empty | [] stays empty as it is in jq.
+//   3. Hand back the grown arena, because every array minted here is addressable only from it.
+
+import "filter/select_node.oo";
+
+// The empty collect used to answer with a single array whatever it was handed,
+// which read as one extra value in 1 // [] | length and as an answer at all to
+// empty | []. A collect is a per value step like any other, so it answers once
+// per value that reached it and not at all when there were none.
+//
+// It is handed a count rather than the list on purpose. Taking the list would
+// move it, and the caller still has to walk it afterwards; a move in a loop on
+// one page is enough to make the compiler read every later use of that name in
+// the same page as a use after the move.
+pub fn empty_arrays(doc: JDoc, count: Int) -> SRes {
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < count {
+        let made: SRes = array_result(live, list_new());
+        live = made.doc;
+        out = concat_indices(out, made.out);
+        i = i + 1;
+    }
+    return SRes { doc: live, out: out };
+}
+
+// A collect with a body used to be answered here, by reading the body over the
+// whole stream at once and wrapping the lot in one array. That merged the
+// answers of every value that reached it, so [1,2,3] | .[] | [.] was [[1,2,3]]
+// where jq answers [[1],[2],[3]]. The per-value split needed a loop that had to
+// live in gather, on the one page that cannot grow, and it was refused as
+// unbuildable for a long time. It is not a new loop at all: per_member's map
+// mode already walks values one at a time and gathers each one's answers, and
+// this page had no say in which one it was pointed at. The whole of that
+// function now lives in eval_run.oo as a mode, so nothing is left here but the
+// empty collect.

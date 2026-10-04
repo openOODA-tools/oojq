@@ -1,0 +1,127 @@
+// # MCP Serve Loop
+//
+// Logline: Reads JSON-RPC frames off stdin until the stream ends, answering each request the MCP method names.
+//
+// Setup: Needs FsReadCap for stdin and ProcessCap to stop. Writes only to stdout, because a single stray byte there corrupts the protocol.
+// Beats:
+//   1. Dispatch initialize, tools/list, and tools/call, and answer nothing to a notification.
+//   2. Keep whatever framing the client used, which is what makes a bare JSON client and a Content-Length client both work.
+//   3. An unparseable frame is answered as a JSON-RPC error rather than dropped, so the client is not left waiting.
+
+import "parse/anchor.oo";
+import "ipc/mcp_frame.oo";
+import "ipc/mcp_reply.oo";
+import "ipc/mcp_tool.oo";
+import "ipc/mcp_grammar.oo";
+
+pub fn mcp_idle_ms() -> Int { return 1000; }
+
+pub fn mcp_server_name() -> String {
+    return "{\"name\":\"oojq\",\"version\":\"0.1.0\"}";
+}
+
+pub fn mcp_initialize_result() -> String {
+    return "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":"
+        + mcp_server_name() + "}";
+}
+
+// One request in, one reply out, or nothing at all when the caller sent a
+// notification. An unknown method is an error by the spec, not a crash.
+pub fn mcp_dispatch(body: String) -> String {
+    let got: Result[JDoc, String] = parse_document(body);
+    match got {
+        Err(e) => { return mcp_error("null", 0 - 32700, "parse error: " + e); }
+        Ok(doc) => {
+            let method: String = mcp_method_of(doc);
+            if chars_len(method) == 0 {
+                return mcp_error("null", 0 - 32600, "invalid request: no method");
+            }
+            if !mcp_wants_reply(doc) { return ""; }
+            let id: String = mcp_id_of(doc);
+            if method == "initialize" { return mcp_result(id, mcp_initialize_result()); }
+            if method == "ping" { return mcp_result(id, "{}"); }
+            if method == "tools/list" { return mcp_result(id, mcp_tools_schema()); }
+            if method == "tools/call" {
+                let called: Result[String, String] = mcp_call(doc);
+                match called {
+                    Err(e) => { return mcp_error(id, 0 - 32602, e); }
+                    Ok(payload) => { return mcp_result(id, payload); }
+                }
+            }
+            return mcp_error(id, 0 - 32601, "method not found: " + method);
+        }
+    }
+}
+
+// The tool name selects the body. An unknown tool is an error, which is what a
+// client needs in order to correct itself rather than retry. The error is raised
+// here rather than returned as text, because returning a whole envelope would
+// wrap one JSON-RPC reply inside another.
+fn mcp_call(doc: JDoc) -> Result[String, String] {
+    let name: String = mcp_text_field(doc, ".params.name");
+    if name == "jq" { return Ok(mcp_run_jq(doc)); }
+    if name == "jq_check" { return Ok(mcp_run_check(doc)); }
+    if name == "jq_grammar" { return Ok(mcp_text_payload(mcp_grammar_text())); }
+    return Err("unknown tool: " + name);
+}
+
+// The loop. A frame that is not complete yet is left in the buffer and more input
+// is asked for; end of input ends the loop, and anything still buffered at that
+// point is a truncated frame, which is reported rather than silently dropped.
+pub fn mcp_serve(fs: &FsReadCap) -> Result[Int, String] {
+    let mut buf: String = "";
+    let mut alive: Bool = true;
+    // Whichever framing the client opened with is the framing every answer uses,
+    // including the one that reports the stream ended early.
+    let mut framed: Bool = false;
+    while alive {
+        let start: Int = mcp_body_start(buf);
+        if start < 0 {
+            let bare_at: Int = mcp_bare_start(buf);
+            if bare_at >= 0 {
+                let take: Int = mcp_bare_end(buf);
+                if take > bare_at {
+                    let body: String = str_slice(buf, bare_at, take);
+                    let rest: String = str_slice(buf, take, chars_len(buf));
+                    buf = rest;
+                    emit(mcp_dispatch(body), framed);
+                    continue;
+                }
+            }
+            match oo_read_stdin_chunk(fs, mcp_idle_ms()) {
+                Err(e) => {
+                    if !mcp_all_space(buf) {
+                        emit(mcp_error("null", 0 - 32700, "truncated frame at end of input"), framed);
+                    }
+                    alive = false;
+                }
+                Ok(chunk) => { buf = buf + chunk; }
+            }
+            continue;
+        }
+        let want: Int = mcp_want_bytes(buf);
+        if want < 0 {
+            return Err("malformed Content-Length header");
+        }
+        framed = true;
+        let end: Int = mcp_body_end(buf, start, want);
+        if end < 0 {
+            match oo_read_stdin_chunk(fs, mcp_idle_ms()) {
+                Err(e) => { return Err("truncated frame at end of input"); }
+                Ok(chunk) => { buf = buf + chunk; }
+            }
+            continue;
+        }
+        let body2: String = str_slice(buf, start, end);
+        let rest2: String = str_slice(buf, end, chars_len(buf));
+        buf = rest2;
+        emit(mcp_dispatch(body2), framed);
+    }
+    return Ok(0);
+}
+
+fn emit(reply: String, framed: Bool) -> String {
+    if chars_len(reply) == 0 { return ""; }
+    print(mcp_frame_reply(reply, framed));
+    return "";
+}

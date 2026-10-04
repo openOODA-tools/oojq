@@ -1,0 +1,254 @@
+// # Operators Over Two Values
+//
+// Logline: Applies one arithmetic, comparison, or merge operator to two values that are already in hand.
+//
+// Setup: Pure, no capability needed. Every operator takes two node indices and returns one result, so nothing here has to know how its inputs were produced.
+// Beats:
+//   1. Add numbers through the decimal layer, and strings, arrays, and objects by their own rules, with jq's null.
+//   2. Multiply, divide, and take a remainder exactly, on digit runs, so no answer is a rounded double.
+//   3. Order values the way jq orders them: null, then false, then true, then numbers, strings, arrays, objects.
+
+import "filter/select_node.oo";
+import "filter/eval/num/num_add.oo";
+import "filter/eval/float_op.oo";
+import "filter/eval/eval_leaf.oo";
+import "filter/eval/eval_cmp.oo";
+import "filter/eval/eval_div.oo";
+import "filter/builtin/anchor.oo";
+import "render/render_value.oo";
+
+fn both_numbers(a: JVal, b: JVal) -> Bool {
+    return is_number_kind(a.kind) && is_number_kind(b.kind);
+}
+
+pub fn op_add(doc: JDoc, x: Int, y: Int) -> Result[SRes, String] {
+    let a: JVal = jval_at(doc, x);
+    let b: JVal = jval_at(doc, y);
+    // Adding is the one operator with a null in it: null + x is x, on either
+    // side, for every kind. That is what makes add an empty array null rather
+    // than zero, and a null among numbers invisible. jq refuses null for
+    // every other operator, so the other four keep naming it as a kind.
+    if a.kind == "null" { return Ok(SRes { doc: doc, out: one(y) }); }
+    if b.kind == "null" { return Ok(SRes { doc: doc, out: one(x) }); }
+    if a.kind == "float" || b.kind == "float" { return float_binop(doc, "+", x, y); }
+    if both_numbers(a, b) {
+        let na: Result[Num, String] = num_of(a);
+        let nb: Result[Num, String] = num_of(b);
+        match na {
+            Err(e) => { return Err(e); }
+            Ok(pa) => {
+                match nb {
+                    Err(e) => { return Err(e); }
+                    Ok(pb) => {
+                        let sum: Num = num_add(pa, pb);
+                        return Ok(num_node(doc, sum));
+                    }
+                }
+            }
+        }
+    }
+    if a.kind == "string" && b.kind == "string" {
+        return Ok(str_result(doc, a.sval + b.sval));
+    }
+    if a.kind == "array" && b.kind == "array" {
+        return Ok(array_result(doc, concat_indices(a.kids, b.kids)));
+    }
+    if a.kind == "object" && b.kind == "object" {
+        return Ok(merge_objects(doc, a, b));
+    }
+    return Err(cannot_pair(doc, x, y, "added"));
+}
+
+// Merging objects keeps the left hand side's order and lets a right hand side
+// member replace the one it shares a name with.
+fn merge_objects(doc: JDoc, a: JVal, b: JVal) -> SRes {
+    let mut keys: List[String] = list_new();
+    let mut kids: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(a.keys) {
+        keys = list_push(keys, list_get(a.keys, i));
+        kids = list_push(kids, list_get(a.kids, i));
+        i = i + 1;
+    }
+    let mut j: Int = 0;
+    while j < list_len(b.keys) {
+        let k: String = list_get(b.keys, j);
+        let v: Int = list_get(b.kids, j);
+        let mut nk: List[String] = list_new();
+        let mut nv: List[Int] = list_new();
+        let mut hit: Bool = false;
+        let mut t: Int = 0;
+        while t < list_len(keys) {
+            if list_get(keys, t) == k {
+                nk = list_push(nk, k);
+                nv = list_push(nv, v);
+                hit = true;
+            } else {
+                nk = list_push(nk, list_get(keys, t));
+                nv = list_push(nv, list_get(kids, t));
+            }
+            t = t + 1;
+        }
+        if !hit {
+            nk = list_push(nk, k);
+            nv = list_push(nv, v);
+        }
+        keys = nk;
+        kids = nv;
+        j = j + 1;
+    }
+    return object_result(doc, keys, kids);
+}
+
+pub fn op_sub(doc: JDoc, x: Int, y: Int) -> Result[SRes, String] {
+    let a: JVal = jval_at(doc, x);
+    let b: JVal = jval_at(doc, y);
+    if a.kind == "float" || b.kind == "float" { return float_binop(doc, "-", x, y); }
+    if !both_numbers(a, b) {
+        return Err(cannot_pair(doc, x, y, "subtracted"));
+    }
+    let na: Result[Num, String] = num_of(a);
+    match na {
+        Err(e) => { return Err(e); }
+        Ok(pa) => {
+            let nb: Result[Num, String] = num_of(b);
+            match nb {
+                Err(e) => { return Err(e); }
+                Ok(pb) => {
+                    let d: Num = num_sub(pa, pb);
+                    return Ok(num_node(doc, d));
+                }
+            }
+        }
+    }
+}
+
+// A string repeated a whole number of times, from either side, and two numbers
+// multiplied exactly. jq multiplies in doubles and gets 0.1 * 0.2 wrong as
+// 0.020000000000000004; num_mul works on digit runs and gets it right, which is
+// a real difference in the answer and not only in how it is printed.
+pub fn op_mul(doc: JDoc, x: Int, y: Int) -> Result[SRes, String] {
+    let a: JVal = jval_at(doc, x);
+    let b: JVal = jval_at(doc, y);
+    if a.kind == "string" && b.kind == "int" {
+        return Ok(str_result(doc, repeat_to(a.sval, b.ival)));
+    }
+    if b.kind == "string" && a.kind == "int" {
+        return Ok(str_result(doc, repeat_to(b.sval, a.ival)));
+    }
+    if a.kind == "float" || b.kind == "float" { return float_binop(doc, "*", x, y); }
+    if !is_number_kind(a.kind) || !is_number_kind(b.kind) {
+        return Err(cannot_pair(doc, x, y, "multiplied"));
+    }
+    // There used to be an Int multiply here for two Int operands, and it was
+    // wrong twice over. 9223372036854775807 * 2 came to -2, and 0 * -1 came to 0
+    // where jq writes -0, because an Int has no room for a negative zero. The
+    // digit path is exact at any size and num_node gives an Int back whenever
+    // the answer still fits one, so nothing is lost by always taking it.
+    let na: Result[Num, String] = num_of(a);
+    let nb: Result[Num, String] = num_of(b);
+    match na {
+        Err(e) => { return Err(e); }
+        Ok(pa) => {
+            match nb {
+                Err(e) => { return Err(e); }
+                Ok(pb) => { return Ok(num_node(doc, num_mul(pa, pb))); }
+            }
+        }
+    }
+}
+
+// add is jq's fold from null with +, over an array's members or an object's
+// values. Folding from null is what makes an empty array null and not zero, and
+// what lets a null sit among numbers without being noticed. It used to read the
+// integer part off every member instead, so [1, 2.5] came to 1 with the 2.5
+// dropped and no complaint: the one answer here that was wrong rather than
+// missing. A refusal is the operator's own, so a mixed array of shapes still
+// reads the way jq reads it.
+pub fn array_add(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" && v.kind != "object" {
+        return Err("Cannot iterate over " + kind_word(v.kind) + " (" + shown_value(doc, idx) + ")");
+    }
+    let seed: SRes = null_result(doc);
+    let mut live: JDoc = seed.doc;
+    let mut acc: List[Int] = seed.out;
+    let mut i: Int = 0;
+    while i < list_len(v.kids) {
+        let step: Result[SRes, String] = op_add(live, list_get(acc, 0), list_get(v.kids, i));
+        match step {
+            Err(e) => { return Err(e); }
+            Ok(r) => { live = r.doc; acc = r.out; }
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: acc });
+}
+
+pub fn op_neg(doc: JDoc, x: Int) -> Result[SRes, String] {
+    let a: JVal = jval_at(doc, x);
+    if a.kind == "int" { return Ok(int_result(doc, 0 - a.ival)); }
+    if a.kind == "float" {
+        let na: Result[Num, String] = num_of(a);
+        match na {
+            Err(e) => { return Err(e); }
+            Ok(p) => {
+                let f: Num = num_neg(p);
+                return Ok(num_node(doc, f));
+            }
+        }
+    }
+    return Err("cannot negate a " + a.kind);
+}
+
+// One arithmetic, comparison, or comparison-by-value operator over two values
+// that are already in hand, named by the parser.
+pub fn bin_over(doc: JDoc, op: String, x: Int, y: Int) -> Result[SRes, String] {
+    if op == "+" { return op_add(doc, x, y); }
+    if op == "-" { return op_sub(doc, x, y); }
+    if op == "*" { return op_mul(doc, x, y); }
+    if op == "/" { return op_div(doc, x, y); }
+    if op == "%" { return op_mod(doc, x, y); }
+    if op == "==" { return Ok(bool_result(doc, values_equal(doc, x, y))); }
+    if op == "!=" { return Ok(bool_result(doc, !values_equal(doc, x, y))); }
+    if op == "<" { return Ok(bool_result(doc, compare_values(doc, x, y) < 0)); }
+    if op == "<=" { return Ok(bool_result(doc, compare_values(doc, x, y) <= 0)); }
+    if op == ">" { return Ok(bool_result(doc, compare_values(doc, x, y) > 0)); }
+    if op == ">=" { return Ok(bool_result(doc, compare_values(doc, x, y) >= 0)); }
+    return Err("unknown operator \"" + op + "\"");
+}
+
+// A key is a whole number when it came from one, because a subscript written
+// .[1] must find the same place a subscript written 1 would.
+pub fn digits_to_int(s: String) -> Int {
+    let mut v: Int = 0;
+    let mut i: Int = 0;
+    while i < chars_len(s) {
+        v = v * 10 + digit_at(s, i);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Each left hand value pairs with the right it is being combined with, and the
+// arena is threaded so two pairs can never mint the same node twice. The right
+// side is the one held still: jq writes the pairs right side first, so
+// (1,2,3) + (100,200) is 101 102 103 201 202 203, and holding the *left* still
+// would answer 101 201 102 202 103 203, which is the same set of values in the
+// wrong order. Order is part of the contract, so the operand that walks is the
+// one on the left of the operator.
+pub fn append_pairs(live: SRes, op: String, y: Int, lefts: List[Int]) -> Result[SRes, String] {
+    let mut out: List[Int] = list_new();
+    let mut grown: JDoc = live.doc;
+    let mut j: Int = 0;
+    while j < list_len(lefts) {
+        let s: Result[SRes, String] = bin_over(grown, op, list_get(lefts, j), y);
+        match s {
+            Err(e) => { return Err(e); }
+            Ok(v) => { grown = v.doc; out = concat_indices(out, v.out); }
+        }
+        j = j + 1;
+    }
+    return Ok(SRes { doc: grown, out: out });
+}
+

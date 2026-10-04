@@ -1,0 +1,18 @@
+// # Filter Run Anchor
+//
+// Logline: Re-exports the pages that walk a parsed filter over a value stream.
+//
+// Setup: Pure, no capability needed. The dispatcher owns every rule that has to run a sub filter, which is why it cannot be split any further.
+// Beats:
+//   1. Dispatch a node kind to one rule, carrying the arena along.
+//   2. Combine the two sides of a pipe, a comma, a word operator, or an alternative.
+//   3. Order and group a list of values by a key.
+
+import "eval_run.oo";
+import "eval_join.oo";
+import "eval_sort.oo";
+import "eval_path.oo";
+
+pub fn run_anchor_status() -> String {
+    return "run: dispatch, joining operators, ordering, and paths";
+}

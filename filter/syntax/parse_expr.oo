@@ -1,0 +1,256 @@
+// # Operators And Suffixes Of A Filter Expression
+//
+// Logline: Folds the operator levels from the tightest binding outward, above the primary forms.
+//
+// Setup: Pure, no capability needed. One page owns every level that sits below the conditional, comma, and pipe, so the grammar reads top down as it gets looser.
+// Beats:
+//   1. Take the suffixes: a member name, a subscript, a trailing question mark, and recursion.
+//   2. Fold multiplication, addition, and comparison left to right, one level per fold.
+//   3. Read a leading minus as a negation of everything that binds tighter than it.
+
+import "syntax/parse_prim.oo";
+
+fn wrap_node(kind: String, target: Int) -> ANode {
+    let mut n: ANode = node_blank(kind);
+    n.a = target;
+    return n;
+}
+
+fn stop_here(r: POut, c: Cur) -> POut {
+    return POut { ast: r.ast, cur: c, node: 0 - 1 };
+}
+
+pub fn parse_postfix(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_primary(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return fold_postfix(r); }
+    }
+}
+
+fn fold_postfix(r: POut) -> Result[POut, String] {
+    let mut acc: POut = r;
+    let mut go: Bool = true;
+    while go {
+        match one_suffix(acc) {
+            Err(e) => { return Err(e); }
+            Ok(nx) => {
+                if nx.node < 0 { go = false; } else { acc = nx; }
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+fn one_suffix(r: POut) -> Result[POut, String] {
+    let c: Cur = cur_skip(r.cur);
+    if cur_end(c) { return Ok(stop_here(r, c)); }
+    let ch: String = cur_at(c);
+    if ch == "?" {
+        let made_node: ANode = wrap_node("optional", r.node);
+        let add: ARes = ast_add(r.ast, made_node);
+        return Ok(POut { ast: add.ast, cur: cur_step(c, 1), node: add.idx });
+    }
+    if ch == "." { return suffix_dot(c, r); }
+    if ch == "[" { return suffix_bracket(c, r); }
+    return Ok(stop_here(r, c));
+}
+
+fn suffix_dot(c: Cur, r: POut) -> Result[POut, String] {
+    let after: Cur = cur_step(c, 1);
+    if cur_has(after, "\"") {
+        return named_key(after, r, scan_string(after));
+    }
+    return named_key(after, r, scan_ident(after));
+}
+
+// A member name is written plainly after a dot, or in quotes when it holds
+// punctuation. Both become the same field node.
+fn named_key(here: Cur, r: POut, got: Result[Tok, String]) -> Result[POut, String] {
+    match got {
+        Err(e) => { return Err(e + " after \".\""); }
+        Ok(t) => {
+            let made_node: ANode = n_field(t.text, r.node);
+            let add: ARes = ast_add(r.ast, made_node);
+            return Ok(POut { ast: add.ast, cur: Cur { src: here.src, pos: t.pos }, node: add.idx });
+        }
+    }
+}
+
+fn suffix_bracket(c: Cur, r: POut) -> Result[POut, String] {
+    let got: Result[Tok, String] = scan_group(c);
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(t) => { return bracket_node(c, t, r); }
+    }
+}
+
+fn bracket_node(c: Cur, t: Tok, r: POut) -> Result[POut, String] {
+    let inner: String = t.text;
+    if chars_len(trim_ws(inner)) == 0 {
+        let made_node: ANode = wrap_node("iterate", r.node);
+        let add: ARes = ast_add(r.ast, made_node);
+        return Ok(POut { ast: add.ast, cur: Cur { src: c.src, pos: t.pos }, node: add.idx });
+    }
+    let probe: Cur = Cur { src: inner, pos: 0 };
+    let colon: Int = find_top_colon(probe);
+    if colon < 0 {
+        return literal_subscript(c, probe, t, r);
+    }
+    let lo: Result[Int, String] = slice_bound(str_slice(inner, 0, colon));
+    match lo {
+        Err(e) => { return Err(e); }
+        Ok(a) => {
+            let hi: Result[Int, String] = slice_bound(str_slice(inner, colon + 1, chars_len(inner)));
+            match hi {
+                Err(e) => { return Err(e); }
+                Ok(b) => {
+                    let made_node: ANode = n_slice(a, b, r.node);
+                    let add: ARes = ast_add(r.ast, made_node);
+                    return Ok(POut { ast: add.ast, cur: Cur { src: c.src, pos: t.pos }, node: add.idx });
+                }
+            }
+        }
+    }
+}
+
+// A node is never built in place: it is added to the arena and the cursor is
+// carried on untouched, which is the same three steps at every operator level.
+fn graft(x: POut, made: ANode) -> POut {
+    let add: ARes = ast_add(x.ast, made);
+    return POut { ast: add.ast, cur: x.cur, node: add.idx };
+}
+
+pub fn parse_unary(c: Cur, ast: AList) -> Result[POut, String] {
+    let p: Cur = cur_skip(c);
+    if !cur_has(p, "-") {
+        return parse_postfix(p, ast);
+    }
+    let got: Result[POut, String] = parse_unary(cur_step(p, 1), ast);
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(x) => {
+            let made_node: ANode = n_bin("neg", x.node, 0 - 1);
+            return Ok(graft(x, made_node));
+        }
+    }
+}
+
+// The operator standing here the cursor, or an empty string. Two character
+// operators are offered first so "not" is never read as a lone slash.
+fn op_at(c: Cur, a: String, b: String, cc: String) -> String {
+    if cur_has(c, a) { return a; }
+    if b != "" && cur_has(c, b) { return b; }
+    if cc != "" && cur_has(c, cc) { return cc; }
+    return "";
+}
+
+pub fn parse_mult(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_unary(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return fold_mult(r); }
+    }
+}
+
+// A one character operator is the first half of an update when the next byte is
+// an =, and then it is not an operator at this level: jq's grammar puts the
+// update operators looser than every comparison. See AGENTS.md.
+fn is_update(p: Cur) -> Bool {
+    return cur_has(cur_step(p, 1), "=");
+}
+
+fn fold_mult(r: POut) -> Result[POut, String] {
+    let mut acc: POut = r;
+    let mut go: Bool = true;
+    while go {
+        let p: Cur = cur_skip(acc.cur);
+        let mut op: String = op_at(p, "*", "/", "%");
+        if op == "/" && cur_has(p, "//") { op = ""; }
+        if op != "" && is_update(p) { op = ""; }
+        if op == "" { go = false; }
+        else {
+            let got: Result[POut, String] = parse_unary(cur_step(p, 1), acc.ast);
+            match got {
+                Err(e) => { return Err(e); }
+                Ok(x) => {
+                    let made: ANode = n_bin(op, acc.node, x.node);
+                    acc = graft(x, made);
+                }
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+pub fn parse_additive(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_mult(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return fold_additive(r); }
+    }
+}
+
+fn fold_additive(r: POut) -> Result[POut, String] {
+    let mut acc: POut = r;
+    let mut go: Bool = true;
+    while go {
+        let p: Cur = cur_skip(acc.cur);
+        let mut op: String = op_at(p, "+", "-", "");
+        if op != "" && is_update(p) { op = ""; }
+        if op == "" { go = false; }
+        else {
+            let got: Result[POut, String] = parse_mult(cur_step(p, 1), acc.ast);
+            match got {
+                Err(e) => { return Err(e); }
+                Ok(x) => {
+                    let made: ANode = n_bin(op, acc.node, x.node);
+                    acc = graft(x, made);
+                }
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+pub fn parse_compare(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_additive(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return fold_compare(r); }
+    }
+}
+
+fn fold_compare(r: POut) -> Result[POut, String] {
+    let mut acc: POut = r;
+    let mut go: Bool = true;
+    while go {
+        let p: Cur = cur_skip(acc.cur);
+        let op: String = cmp_at(p);
+        if op == "" { go = false; }
+        else {
+            let got: Result[POut, String] = parse_additive(cur_step(p, chars_len(op)), acc.ast);
+            match got {
+                Err(e) => { return Err(e); }
+                Ok(x) => {
+                    let made: ANode = n_bin(op, acc.node, x.node);
+                    acc = graft(x, made);
+                }
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+// A comparison operator is one or two characters wide, so this level steps by
+// whatever it matched. A fixed two ate the first digit of a tight right hand
+// side, so .a>.b only parsed when a space happened to stand there.
+fn cmp_at(c: Cur) -> String {
+    if cur_has(c, "==") { return "=="; }
+    if cur_has(c, "!=") { return "!="; }
+    if cur_has(c, "<=") { return "<="; }
+    if cur_has(c, ">=") { return ">="; }
+    if cur_has(c, "<") { return "<"; }
+    if cur_has(c, ">") { return ">"; }
+    return "";
+}

@@ -1,0 +1,112 @@
+// # Building An Object From Gathered Entries
+//
+// Logline: Multiplies the entries of a written object together and mints one object per combination.
+//
+// Setup: Pure, no capability needed. The entries arrive already gathered and already read, so this page only multiplies and mints.
+// Beats:
+//   1. Take one entry at a time, multiplying it against the objects built so far with the new entry innermost.
+//   2. Stop with nothing at all when an entry answered nothing, which is what {a: empty} means.
+//   3. Mint each combination as it is reached, so a name written twice keeps its first position for free.
+
+import "filter/select_node.oo";
+import "render/render_value.oo";
+
+// body is the array the parser wrote: two entries per written entry, its values
+// then its key, in the order they were written. A value that answered more than
+// once and a key read in brackets both multiply, and the entry written first
+// staying outermost is what puts its member in front and its generator in the
+// slow position, the way jq orders the objects it answers.
+pub fn builtin_object(doc: JDoc, body: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, body);
+    if v.kind != "array" {
+        return Err("an object needs its entries gathered, not a " + kind_word(v.kind));
+    }
+    let seed: SRes = object_result(doc, list_new(), list_new());
+    let mut live: JDoc = seed.doc;
+    let mut parts: List[Int] = seed.out;
+    let mut why: String = "";
+    let mut stop: Bool = false;
+    let mut i: Int = 0;
+    while i < list_len(v.kids) && !stop {
+        match widen(live, parts, v, i) {
+            Err(e) => { why = e; stop = true; }
+            Ok(z) => { live = z.doc; parts = z.out; }
+        }
+        i = i + 2;
+    }
+    if stop { return Err(why); }
+    return Ok(SRes { doc: live, out: parts });
+}
+
+// One written entry against every object built so far. The objects already built
+// are the outer loop and this entry is the inner one, so the entry written first
+// varies slowest and each object keeps the members it already had in order.
+//
+// The key is read here rather than taken as written, so a key in brackets that
+// answers a number is refused the way jq refuses it instead of being coerced
+// into a name. An entry that answered nothing carries no name and no value, and
+// that is what leaves no object behind rather than one missing a member.
+fn widen(doc: JDoc, parts: List[Int], v: JVal, i: Int) -> Result[SRes, String] {
+    let vals: JVal = jval_at(doc, list_get(v.kids, i));
+    if vals.kind != "array" { return Err("an object entry is not gathered"); }
+    if i + 1 >= list_len(v.kids) { return Err("an object entry has no key"); }
+    let knodes: JVal = jval_at(doc, list_get(v.kids, i + 1));
+    if knodes.kind != "array" { return Err("an object key is not gathered"); }
+    if list_len(vals.kids) == 0 || list_len(knodes.kids) == 0 {
+        return Ok(SRes { doc: doc, out: list_new() });
+    }
+    let mut names: List[String] = list_new();
+    let mut t: Int = 0;
+    while t < list_len(knodes.kids) {
+        let at: Int = list_get(knodes.kids, t);
+        let got: JVal = jval_at(doc, at);
+        if got.kind != "string" {
+            return Err("Cannot use " + kind_word(got.kind) + " (" + shown_value(doc, at) + ") as object key");
+        }
+        names = list_push(names, got.sval);
+        t = t + 1;
+    }
+    return grow(doc, parts, names, vals.kids);
+}
+
+fn grow(doc: JDoc, parts: List[Int], names: List[String], kids: List[Int]) -> Result[SRes, String] {
+    let mut live: JDoc = doc;
+    let mut fresh: List[Int] = list_new();
+    let mut j: Int = 0;
+    while j < list_len(parts) {
+        let step: SRes = grow_pairs(live, fresh, jval_at(live, list_get(parts, j)), names, kids);
+        live = step.doc;
+        fresh = step.out;
+        j = j + 1;
+    }
+    return Ok(SRes { doc: live, out: fresh });
+}
+
+// One object already built, against every combination of this entry's names and
+// values. The object is read apart and rebuilt, which is what puts the new member
+// last, and jval_object is what then keeps a name written twice.
+//
+// The grown arena comes back with the nodes, because every node minted here is
+// addressable only from it. Handing back the list alone loses the objects: the
+// caller's arena never received them, and the answer renders as nothing at all
+// rather than as a wrong value, which is the quietest way this can go wrong.
+fn grow_pairs(doc: JDoc, fresh: List[Int], base: JVal, names: List[String], kids: List[Int]) -> SRes {
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = fresh;
+    let mut m: Int = 0;
+    while m < list_len(names) {
+        let mut n: Int = 0;
+        while n < list_len(kids) {
+            let mut keys: List[String] = base.keys;
+            let mut vals: List[Int] = base.kids;
+            keys = list_push(keys, list_get(names, m));
+            vals = list_push(vals, list_get(kids, n));
+            let made: SRes = object_result(live, keys, vals);
+            live = made.doc;
+            out = list_push(out, list_get(made.out, 0));
+            n = n + 1;
+        }
+        m = m + 1;
+    }
+    return SRes { doc: live, out: out };
+}

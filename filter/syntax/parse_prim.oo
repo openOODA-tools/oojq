@@ -1,0 +1,229 @@
+// # Primary Forms Of A Filter Expression
+//
+// Logline: Reads one term of a filter, including the bracketed forms whose bodies are kept as text.
+//
+// Setup: Pure, no capability needed. Only the scanner is imported, so this page owns the grammar's leaves.
+// Beats:
+//   1. Find the bracket that closes the one in hand, skipping brackets inside strings.
+//   2. Read a conditional, matching then, elif, else, and end here bracket depth zero.
+//   3. Turn a term into one node, keeping a bracketed body as the text it was written as.
+
+import "syntax/scan/parse_span.oo";
+import "syntax/scan/parse_lit.oo";
+import "filter/ast.oo";
+import "syntax/lower.oo";
+import "syntax/object_lower.oo";
+import "parse/decode_number.oo";
+
+// Words jq reserves. Naming them is better than letting them read as a call to
+// a builtin that does not exist. This was written and then never called, so a
+// filter beginning with def was answered "unknown builtin \"def\"; did you mean
+// \"del\"?" — a suggestion that sends the reader after a builtin with one letter
+// in common. An empty answer means the word is not reserved and the name is the
+// evaluator's business.
+fn reserved_word(w: String) -> String {
+    if w == "def" { return "\"def\" is not supported in this build"; }
+    if w == "as" { return "binding a variable with \"as\" is not supported in this build"; }
+    if w == "reduce" { return "\"reduce\" is not supported in this build"; }
+    if w == "foreach" { return "\"foreach\" is not supported in this build"; }
+    if w == "try" { return "\"try\" is not supported in this build; use ? instead"; }
+    if w == "label" { return "\"label\" is not supported in this build"; }
+    if w == "import" { return "\"import\" is not supported in this build"; }
+    if w == "include" { return "\"include\" is not supported in this build"; }
+    if w == "__loc__" { return "\"__loc__\" is not supported in this build"; }
+    return "";
+}
+
+fn parse_primary(c0: Cur, ast: AList) -> Result[POut, String] {
+    let c: Cur = cur_skip(c0);
+    if cur_end(c) {
+        return Err("filter ends where a value was expected");
+    }
+    let ch: String = cur_at(c);
+    if ch == "$" {
+        return Err("variables are not supported in this build");
+    }
+    if ch == "\"" {
+        let r: Result[Tok, String] = scan_string(c);
+        match r {
+            Err(e) => { return Err(e); }
+            Ok(t) => {
+                let made_node: ANode = n_str(t.text);
+                let add: ARes = ast_add(ast, made_node);
+                return Ok(POut { ast: add.ast, cur: Cur { src: c.src, pos: t.pos }, node: add.idx });
+            }
+        }
+    }
+    if digit_char(ch) || (ch == "-" && digit_char(cur_at(cur_step(c, 1)))) {
+        let r: Result[Tok, String] = scan_number_lit(c);
+        match r {
+            Err(e) => { return Err(e); }
+            Ok(t) => {
+                let mut n: ANode = n_int(0);
+                if is_float_text(t.text) {
+                    n = n_float(t.text);
+                } else if fits_int_text(t.text) {
+                    let v: Result[Int, String] = parse_int(t.text);
+                    match v {
+                        Err(e) => { return Err(e); }
+                        Ok(k) => { n = n_int(k); }
+                    }
+                } else {
+                    n = n_float(t.text);
+                }
+                let add: ARes = ast_add(ast, n);
+                return Ok(POut { ast: add.ast, cur: Cur { src: c.src, pos: t.pos }, node: add.idx });
+            }
+        }
+    }
+    return parse_bracket_or_name(c, ast);
+}
+
+// A dot that is followed by a name is left for the suffix pass, which is where
+// .a and ."a b" are read. A dot followed by anything else is the identity.
+fn starts_member(c: Cur) -> Bool {
+    let next: String = cur_at(cur_step(c, 1));
+    return is_ident_start(next) || next == "\"";
+}
+
+fn parse_bracket_or_name(c: Cur, ast: AList) -> Result[POut, String] {
+    let ch: String = cur_at(c);
+    if ch == "(" || ch == "[" || ch == "{" {
+        return keep_group(c, ast);
+    }
+    if ch == "." {
+        if cur_has(c, "..") {
+            let made_node: ANode = node_blank("recurse");
+            let add: ARes = ast_add(ast, made_node);
+            return Ok(POut { ast: add.ast, cur: cur_step(c, 2), node: add.idx });
+        }
+        let made_node: ANode = n_ident();
+        let add: ARes = ast_add(ast, made_node);
+        if starts_member(c) { return Ok(POut { ast: add.ast, cur: c, node: add.idx }); }
+        return Ok(POut { ast: add.ast, cur: cur_step(c, 1), node: add.idx });
+    }
+    return parse_word(c, ast);
+}
+
+// .["a"] and .[0] are the only subscripts this build reads, and both are a
+// member or a position written in full. Anything else is refused rather than
+// guessed here, because guessing here returns the wrong value silently.
+fn literal_subscript(c: Cur, probe: Cur, t: Tok, r: POut) -> Result[POut, String] {
+    let inner: String = trim_ws(t.text);
+    if cur_has(probe, "\"") {
+        let sr: Result[Tok, String] = scan_string(probe);
+        match sr {
+            Err(e) => { return Err(e); }
+            Ok(named) => {
+                let made_node: ANode = n_field(named.text, r.node);
+                let add: ARes = ast_add(r.ast, made_node);
+                return Ok(POut { ast: add.ast, cur: Cur { src: c.src, pos: t.pos }, node: add.idx });
+            }
+        }
+    }
+    let v: Result[Int, String] = parse_int(inner);
+    match v {
+        Err(e) => { return Err("a subscript must be a quoted name or a whole number, not \"" + inner + "\""); }
+        Ok(slot_i) => {
+            let made_node: ANode = n_index(slot_i, r.node);
+            let add: ARes = ast_add(r.ast, made_node);
+            return Ok(POut { ast: add.ast, cur: Cur { src: c.src, pos: t.pos }, node: add.idx });
+        }
+    }
+}
+
+fn keep_group(c: Cur, ast: AList) -> Result[POut, String] {
+    let ch: String = cur_at(c);
+    let r: Result[Tok, String] = scan_group(c);
+    match r {
+        Err(e) => { return Err(e); }
+        Ok(t) => {
+            let kind: String = group_kind(ch);
+            let mut n: ANode = node_blank(kind);
+            n.sval = t.text;
+            if ch == "{" {
+                n.kind = "func";
+                n.name = "__obj";
+                let body: Result[String, String] = object_body(t.text);
+                match body {
+                    Err(e) => { return Err(e); }
+                    Ok(b) => { n.sval = b; }
+                }
+            }
+            let add: ARes = ast_add(ast, n);
+            return Ok(POut { ast: add.ast, cur: Cur { src: c.src, pos: t.pos }, node: add.idx });
+        }
+    }
+}
+
+fn group_kind(ch: String) -> String {
+    if ch == "[" { return "collect"; }
+    if ch == "{" { return "object"; }
+    return "paren";
+}
+
+fn parse_word(c: Cur, ast: AList) -> Result[POut, String] {
+    let r: Result[Tok, String] = scan_ident(c);
+    match r {
+        Err(e) => { return Err(e + " at " + show_where(c)); }
+        Ok(t) => {
+            let after: Cur = Cur { src: c.src, pos: t.pos };
+            let word: String = t.text;
+            return named_term(after, ast, word);
+        }
+    }
+}
+
+fn named_term(c: Cur, ast: AList, w: String) -> Result[POut, String] {
+    if w == "true" || w == "false" || w == "null" {
+        let kind: String = w;
+        let made_node: ANode = node_blank(kind);
+        let add: ARes = ast_add(ast, made_node);
+        return Ok(POut { ast: add.ast, cur: cur_skip(c), node: add.idx });
+    }
+    if w == "if" {
+        return parse_if_body(c, ast);
+    }
+    let spot: Cur = c;
+    let word: String = w;
+    return call_or_name(spot, ast, word);
+}
+
+fn call_or_name(c: Cur, ast: AList, w: String) -> Result[POut, String] {
+    let name: String = w;
+    let probe: Cur = cur_skip(c);
+    if !cur_has(probe, "(") {
+        let said: String = reserved_word(name);
+        if chars_len(said) > 0 { return Err(said); }
+        // A builtin that only exists as a rewrite still exists, so a bare name is
+        // not an unknown one. limit answered "unknown builtin \"limit\"" here,
+        // which points a reader at a name they did get wrong when what they got
+        // wrong was leaving off the argument.
+        if name == "limit" || name == "with_entries" {
+            return Err("\"" + name + "\" needs a filter argument, as in " + name + "(.items[])");
+        }
+        let made_node: ANode = n_func(name);
+        let add: ARes = ast_add(ast, made_node);
+        return Ok(POut { ast: add.ast, cur: probe, node: add.idx });
+    }
+    let r: Result[Tok, String] = scan_group(probe);
+    match r {
+        Err(e) => { return Err(e); }
+        Ok(t) => {
+            let body: String = trim_ws(t.text);
+            if chars_len(body) == 0 {
+                return Err("\"" + name + "()\" needs an argument in this build");
+            }
+            let mut n: ANode = n_func(name);
+            n.sval = body;
+            let add: ARes = ast_add(ast, n);
+            return pick_by_index(c, t, add, name);
+        }
+    }
+}
+
+
+pub fn show_where(c: Cur) -> String {
+    let here: Int = c.pos + 1;
+    return "character " + here.to_string();
+}

@@ -1,0 +1,171 @@
+// # Core Builtins Over One Node
+//
+// Logline: Implements the jq builtins that need no filter argument.
+//
+// Setup: Pure, no capability needed. Every builder appends to the arena it was handed, never a fresh one.
+// Beats:
+//   1. Report size and kind: length, type, not. keys lives in builtin_shape.oo
+//      beside keys_unsorted, because the two are the same read with a sort.
+//   2. Reshape without a filter: reverse, add, join, first, last.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "render/render_value.oo";
+import "std/core/primitives/str.oo";
+
+// jq names both integers and floats "number", so the internal kinds int and
+// float are folded together on the way out.
+pub fn builtin_type(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "int" || v.kind == "float" {
+        return Ok(str_result(doc, "number"));
+    }
+    return Ok(str_result(doc, v.kind));
+}
+
+// length counts array elements, object members, and string bytes, and reports
+// null for everything else, matching jq.
+// length counts what there is, except on a number, where it is the absolute
+// value: jq reads 1|length as 1 and -7|length as 7, and a null has length 0.
+// A boolean is the one kind with no answer, and it is refused by name rather
+// than handed a null that reads as a successful measurement of nothing.
+pub fn builtin_length(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "array" || v.kind == "object" {
+        return Ok(int_result(doc, list_len(v.kids)));
+    }
+    if v.kind == "string" {
+        return Ok(int_result(doc, chars_len(v.sval)));
+    }
+    if v.kind == "null" { return Ok(int_result(doc, 0)); }
+    if v.kind == "bool" {
+        let mut word: String = "false";
+        if v.bval { word = "true"; }
+        return Err("boolean (" + word + ") has no length");
+    }
+    if v.kind == "int" {
+        if v.ival < 0 { return Ok(int_result(doc, 0 - v.ival)); }
+        return Ok(int_result(doc, v.ival));
+    }
+    // A float keeps the text it was written with, so the sign is dropped off
+    // the front of that text rather than converted, which is what this build
+    // does everywhere else it has to show a fractional number.
+    if v.kind == "float" {
+        let text: String = v.sval;
+        if str_sub(text, 0, 1) == "-" {
+            let p: PRes = jdoc_push(doc, jval_float(str_sub(text, 1, chars_len(text))));
+            return Ok(SRes { doc: p.doc, out: one(p.idx) });
+        }
+        return Ok(SRes { doc: doc, out: one(idx) });
+    }
+    return Ok(null_result(doc));
+}
+
+pub fn builtin_reverse(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" {
+        return Err("reverse needs an array, not a " + v.kind);
+    }
+    let mut kids: List[Int] = list_new();
+    let mut i: Int = list_len(v.kids) - 1;
+    while i >= 0 {
+        kids = list_push(kids, list_get(v.kids, i));
+        i = i - 1;
+    }
+    return Ok(array_result(doc, kids));
+}
+
+fn join_strings(doc: JDoc, kids: List[Int], sep: String) -> String {
+    let mut acc: String = "";
+    let mut i: Int = 0;
+    while i < list_len(kids) {
+        if i > 0 { acc = acc + sep; }
+        let e: JVal = jval_at(doc, list_get(kids, i));
+        acc = acc + e.sval;
+        i = i + 1;
+    }
+    return acc;
+}
+
+pub fn builtin_join(doc: JDoc, idx: Int, sep: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" {
+        return Err("join needs an array, not a " + v.kind);
+    }
+    let mut i: Int = 0;
+    while i < list_len(v.kids) {
+        let e: JVal = jval_at(doc, list_get(v.kids, i));
+        if e.kind != "string" {
+            return Err("join needs an array of strings");
+        }
+        i = i + 1;
+    }
+    return Ok(str_result(doc, join_strings(doc, v.kids, sep)));
+}
+
+pub fn builtin_first(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" {
+        return Err("first needs an array, not a " + v.kind);
+    }
+    if list_len(v.kids) == 0 {
+        return Ok(null_result(doc));
+    }
+    return Ok(SRes { doc: doc, out: one(list_get(v.kids, 0)) });
+}
+
+pub fn builtin_last(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" {
+        return Err("last needs an array, not a " + v.kind);
+    }
+    let n: Int = list_len(v.kids);
+    if n == 0 {
+        return Ok(null_result(doc));
+    }
+    return Ok(SRes { doc: doc, out: one(list_get(v.kids, n - 1)) });
+}
+
+// not is jq's if . then false else true end, so it reads any value and only
+// null and false are the ones it turns into true. Refusing a number here was
+// wrong, and 0 and [] are truthy in jq, so their not is false and not a
+// complaint. The rule itself is shared, from the lowest page both import.
+pub fn builtin_not(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    return Ok(bool_result(doc, !truthy(v)));
+}
+
+// toboolean reads only the two booleans and refuses everything else, naming
+// what it was handed. Guessing would be worse than stopping: a number is not
+// false just because it is zero, which is the reading most likely to be wanted.
+pub fn builtin_toboolean(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "bool" {
+        return Err(kind_word(v.kind) + " (" + shown_value(doc, idx) + ") cannot be parsed as a boolean");
+    }
+    return Ok(bool_result(doc, v.bval));
+}
+
+// A number in this build is a sign, some digits, and a fraction: there is no
+// NaN to carry and no infinity to carry, so a number is always finite and is
+// never either of the other two. jq answers false for anything that is not a
+// number, and so does this.
+pub fn builtin_number_pred(doc: JDoc, idx: Int, which: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if which == "isfinite" && (v.kind == "int" || v.kind == "float") {
+        return Ok(bool_result(doc, true));
+    }
+    return Ok(bool_result(doc, false));
+}
+
+// error is jq's way of stopping on purpose. A string argument is the message
+// as written; anything else is shown as a value behind jq's own "(not a
+// string)" prefix, which is what error(1) and a bare error both print. The
+// message is right, but the shell line and the exit status are oojq's: a
+// filter failure is reported the same way wherever in the filter it came from,
+// and this build has no second channel to say "this one was deliberate".
+pub fn builtin_error(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "string" { return Err(v.sval); }
+    return Err("(not a string): " + render_as_text(doc, idx));
+}

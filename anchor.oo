@@ -1,0 +1,17 @@
+// # oojq Project Anchor
+//
+// Logline: Names the four oojq domains and the one job each one owns.
+//
+// Setup: Skeleton. Imports nothing and re-exports nothing; it exists to be the map.
+//
+// Beats:
+//   1. Bind parse, filter, render, and ipc to a single responsibility each.
+//   2. Leave the domain list readable so a missing domain is obvious.
+
+pub fn oojq_domains() -> List[String] {
+    let d: List[String] = list_new();
+    let d2: List[String] = list_push(d, "parse: text to value tree");
+    let d3: List[String] = list_push(d2, "filter: value tree to value stream");
+    let d4: List[String] = list_push(d3, "render: value stream to JSON text");
+    return list_push(d4, "ipc: CLI, MCP stdio, and AF_UNIX socket");
+}

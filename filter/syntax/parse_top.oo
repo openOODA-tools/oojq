@@ -1,0 +1,176 @@
+// # The Loose Operators Of A Filter
+//
+// Logline: Parses or, and, comma, the alternative operator, and the pipe, from the loosest binding down.
+//
+// Setup: Pure, no capability needed. The order here is the order jq binds them in: pipe loosest, then "//", then comma, then or, then and, and comparison tighter still.
+// Beats:
+//   1. Fold a level left to right and hand back to the level below on the first operator that is not its own.
+//   2. Treat and and or as words, so a name that merely starts with them is not an operator.
+//   3. Refuse trailing text once a whole filter has been read.
+
+import "syntax/parse_expr.oo";
+import "syntax/lower.oo";
+
+pub fn parse_and(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_compare(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return fold_word_level(r, "and", 3); }
+    }
+}
+
+pub fn parse_or(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_and(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return fold_word_level(r, "or", 2); }
+    }
+}
+
+pub fn parse_comma(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_or(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return fold_char_level(r, ",", "comma"); }
+    }
+}
+
+pub fn parse_alt(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_update(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return fold_char_level(r, "//", "alt"); }
+    }
+}
+
+pub fn parse_pipe(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_alt(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return fold_char_level(r, "|", "pipe"); }
+    }
+}
+
+// An update is not one of the binary levels, because it does not read its right
+// hand side at the level that binds tighter than it: jq's grammar makes the
+// assignment operators non-associative and puts them between the alternative
+// and every comparison, so `a, b = 1` updates both and `.a + 1 = 2` is a
+// refusal rather than an assignment to something the + never produced.
+//
+// One update and then stop. jq's own level is non-associative, so `.a = .b = 1`
+// is a syntax error there and is a refusal here rather than the left-to-right
+// chain the other levels use.
+pub fn parse_update(c: Cur, ast: AList) -> Result[POut, String] {
+    let first: Result[POut, String] = parse_comma(c, ast);
+    match first {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return one_update(r); }
+    }
+}
+
+fn one_update(acc: POut) -> Result[POut, String] {
+    let p: Cur = cur_skip(acc.cur);
+    if cur_has(p, "//=") {
+        return Err("the //= operator is not supported: jq reads its right hand side eagerly, so \".a //= empty\" answers nothing where \".a // 9\" would not, and that is not a filter this build can hand over");
+    }
+    let op: String = update_at(p);
+    if op == "" { return Ok(acc); }
+    let after: Cur = cur_skip(cur_step(p, chars_len(op)));
+    let got: Result[POut, String] = parse_comma(after, acc.ast);
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(r) => { return rewrite_update(p, acc, op, r, after.pos); }
+    }
+}
+
+// The widest operator is two characters except for a plain =, and the plain one
+// has to be tried last, because a fixed width ate the first digit of `.a =1`.
+// A comparison is refused here as well as read one level down: == and != reach
+// this level only if nothing above took them, and reading the = of a == as an
+// assignment would turn a comparison into a write.
+fn update_at(c: Cur) -> String {
+    if cur_has(c, "==") || cur_has(c, "!=") { return ""; }
+    if cur_has(c, "|=") { return "|="; }
+    if cur_has(c, "+=") { return "+="; }
+    if cur_has(c, "-=") { return "-="; }
+    if cur_has(c, "*=") { return "*="; }
+    if cur_has(c, "/=") { return "/="; }
+    if cur_has(c, "%=") { return "%="; }
+    if cur_has(c, "=") { return "="; }
+    return "";
+}
+
+fn fold_char_level(r: POut, lit: String, kind: String) -> Result[POut, String] {
+    let mut acc: POut = r;
+    let mut go: Bool = true;
+    while go {
+        let p: Cur = cur_skip(acc.cur);
+        if !cur_has(p, lit) {
+            go = false;
+        } else {
+            let got: Result[POut, String] = parse_next(p, lit, acc.ast);
+            match got {
+                Err(e) => { return Err(e); }
+                Ok(x) => {
+                    let made_node: ANode = n_pair(kind, acc.node, x.node);
+                    let add: ARes = ast_add(x.ast, made_node);
+                    acc = POut { ast: add.ast, cur: x.cur, node: add.idx };
+                }
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+fn fold_word_level(r: POut, w: String, width: Int) -> Result[POut, String] {
+    let mut acc: POut = r;
+    let mut go: Bool = true;
+    while go {
+        let p: Cur = cur_skip(acc.cur);
+        if !cur_word(p, w) {
+            go = false;
+        } else {
+            let got: Result[POut, String] = parse_next(p, w, acc.ast);
+            match got {
+                Err(e) => { return Err(e); }
+                Ok(x) => {
+                    let made_node: ANode = n_pair(w, acc.node, x.node);
+                    let add: ARes = ast_add(x.ast, made_node);
+                    acc = POut { ast: add.ast, cur: x.cur, node: add.idx };
+                }
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+// Each level reads its own right hand side from the level that binds tighter.
+// The argument is the operator as it is written, not the node kind it becomes.
+fn parse_next(p: Cur, lit: String, ast: AList) -> Result[POut, String] {
+    if lit == "|" { return parse_alt(cur_step(p, 1), ast); }
+    if lit == "//" { return parse_update(cur_step(p, 2), ast); }
+    if lit == "," { return parse_or(cur_step(p, 1), ast); }
+    if lit == "and" { return parse_compare(cur_step(p, 3), ast); }
+    return parse_and(cur_step(p, 2), ast);
+}
+
+// The one call the rest of the program makes. A filter is read whole or
+// refused whole; there is no partial parse to render.
+pub fn parse_filter(text: String) -> Result[POut, String] {
+    let start: Cur = Cur { src: text, pos: 0 };
+    let c: Cur = cur_skip(start);
+    if cur_end(c) {
+        return Err("filter is empty");
+    }
+    let got: Result[POut, String] = parse_pipe(c, ast_new());
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(r) => {
+            let tail: Cur = cur_skip(r.cur);
+            if !cur_end(tail) {
+                return Err("unexpected \"" + cur_at(tail) + "\" at " + show_where(tail));
+            }
+            return Ok(r);
+        }
+    }
+}

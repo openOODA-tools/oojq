@@ -1,0 +1,137 @@
+// # JSON Value Tree Arena
+//
+// Logline: Declares the flat node arena that holds one parsed JSON document.
+//
+// Setup: Pure type surface, no capability needed. A document is a flat node list plus a root index, so no node nests another node as a struct field.
+//
+// Beats:
+//   1. Name the six kinds oojq emits: null, bool, int, string, array, object.
+//   2. Build containers only once their children are known, so the arena never
+//     needs an in-place slot write.
+
+type JVal = struct {
+    kind: String,
+    bval: Bool,
+    ival: Int,
+    sval: String,
+    keys: List[String],
+    kids: List[Int]
+};
+
+type JDoc = struct {
+    nodes: List[JVal],
+    root: Int
+};
+
+// A parse step returns the grown arena together with the index it just added,
+// because openOODA has no out parameter and the recursion needs both.
+type PRes = struct {
+    doc: JDoc,
+    idx: Int
+};
+
+// An object's two lists always travel together, and openOODA has no tuple, so a
+// step that rewrites one rewrites the pair.
+type Members = struct {
+    keys: List[String],
+    kids: List[Int]
+};
+
+pub fn jval_empty(k: String) -> JVal {
+    return JVal { kind: k, bval: false, ival: 0, sval: "", keys: list_new(), kids: list_new() };
+}
+
+pub fn jval_bool(v: Bool) -> JVal {
+    let mut n: JVal = jval_empty("bool");
+    n.bval = v;
+    return n;
+}
+
+pub fn jval_int(v: Int) -> JVal {
+    let mut n: JVal = jval_empty("int");
+    n.ival = v;
+    return n;
+}
+
+pub fn jval_string(v: String) -> JVal {
+    let mut n: JVal = jval_empty("string");
+    n.sval = v;
+    return n;
+}
+
+// A float keeps the literal text it was written with. openOODA has no
+// Float-to-String conversion, so retaining the source text is the only way to
+// render one; it also makes the parse and render round trip lossless.
+pub fn jval_float(text: String) -> JVal {
+    let mut n: JVal = jval_empty("float");
+    n.sval = text;
+    return n;
+}
+
+pub fn jval_array(kids: List[Int]) -> JVal {
+    return JVal { kind: "array", bval: false, ival: 0, sval: "", keys: list_new(), kids: kids };
+}
+
+// An object never holds a name twice. A name written again keeps the position
+// it was first given and the value it was last given: that is what a merge
+// does, and it is also what a source saying {"a":1,"a":2} means. Left alone,
+// the parser and from_entries each kept both copies, so an object with one name
+// read as two, keys read a name twice, and to_entries read a member that was
+// never written. The rule lives here because jval_object is the one place every
+// object passes through, whichever of them built it.
+pub fn put_member(keys: List[String], kids: List[Int], k: String, v: Int) -> Members {
+    let mut nk: List[String] = list_new();
+    let mut nv: List[Int] = list_new();
+    let mut hit: Bool = false;
+    let mut t: Int = 0;
+    while t < list_len(keys) {
+        if list_get(keys, t) == k {
+            nk = list_push(nk, k);
+            nv = list_push(nv, v);
+            hit = true;
+        } else {
+            nk = list_push(nk, list_get(keys, t));
+            nv = list_push(nv, list_get(kids, t));
+        }
+        t = t + 1;
+    }
+    if !hit {
+        nk = list_push(nk, k);
+        nv = list_push(nv, v);
+    }
+    return Members { keys: nk, kids: nv };
+}
+
+pub fn jval_object(keys: List[String], kids: List[Int]) -> JVal {
+    let mut uk: List[String] = list_new();
+    let mut uv: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(keys) {
+        let m: Members = put_member(uk, uv, list_get(keys, i), list_get(kids, i));
+        uk = m.keys;
+        uv = m.kids;
+        i = i + 1;
+    }
+    return JVal { kind: "object", bval: false, ival: 0, sval: "", keys: uk, kids: uv };
+}
+
+pub fn jdoc_new() -> JDoc {
+    return JDoc { nodes: list_new(), root: 0 - 1 };
+}
+
+// Append a node and report its index. The arena is append only, which is what
+// lets two runs over identical input produce identical node numbering.
+pub fn jdoc_push(doc: JDoc, v: JVal) -> PRes {
+    let mut d: JDoc = doc;
+    let at: Int = list_len(d.nodes);
+    d.nodes = list_push(d.nodes, v);
+    return PRes { doc: d, idx: at };
+}
+
+pub fn jval_at(doc: JDoc, idx: Int) -> JVal {
+    return list_get(doc.nodes, idx);
+}
+
+pub fn jdoc_root(doc: JDoc) -> Int {
+    return doc.root;
+}

@@ -1,0 +1,153 @@
+// # oojq Entry Point
+//
+// Logline: Parses argv, runs parse, filter, and render, and maps the outcome onto an exit status a shell can branch on.
+//
+// Setup: Needs FsReadCap for the input document, and ProcessCap solely to raise a non-zero exit status, because main's return value does not set it.
+//
+// Beats:
+//   1. Answer --help and --version without touching the filesystem.
+//   2. Route the remaining argv to one filter over one source.
+//   3. Exit 0 when values are printed, 2 for any trouble, 1 when a filter
+//      selects nothing. That last one is oojq's own contract and NOT jq's:
+//      jq exits 0 in that case, and only reports it under -e, where it uses 4.
+//      With -e oojq matches jq exactly, including the 4.
+
+import "parse/anchor.oo";
+import "filter/anchor.oo";
+import "render/anchor.oo";
+import "ipc/read_source.oo";
+import "ipc/resolve_args.oo";
+import "ipc/mcp_serve.oo";
+
+pub fn main(fs: &FsReadCap, proc_cap: &ProcessCap, args: List[String]) -> Result[Int, String] {
+    if list_len(args) == 0 {
+        print(render_usage("no filter given"));
+        process_exit(2);
+        return Ok(2);
+    }
+    let first: String = list_get(args, 0);
+    if first == "-h" || first == "--help" {
+        print(render_help());
+        return Ok(0);
+    }
+    if first == "-V" || first == "--version" {
+        print("oojq 0.1.0\n");
+        return Ok(0);
+    }
+    // The MCP surface is a mode, not a filter, so it is answered before argv is
+    // read as filter text. It writes only JSON-RPC to stdout from here on.
+    if first == "--mcp" {
+        let served: Result[Int, String] = mcp_serve(fs);
+        match served {
+            Err(e) => {
+                print("oojq: mcp: " + e + "\n");
+                process_exit(2);
+                return Ok(2);
+            }
+            Ok(c) => { return Ok(c); }
+        }
+    }
+    match resolve_args(fs, args) {
+        Err(e) => {
+            print(render_usage(e));
+            process_exit(2);
+            return Ok(2);
+        }
+        Ok(q) => {
+            match run_query(fs, q) {
+                Err(e) => {
+                    print("oojq: " + e + "\n");
+                    process_exit(2);
+                    return Ok(2);
+                }
+                Ok(code) => {
+                    if code != 0 { process_exit(code); }
+                    return Ok(code);
+                }
+            }
+        }
+    }
+}
+
+// The whole pipeline in one place: read, parse, evaluate, print. The parsed
+// argv is taken whole rather than as five scalars, because a sixth flag would
+// otherwise be a sixth parameter and the signature would grow instead of the
+// type. Returning the code rather than exiting lets the caller own ProcessCap
+// exactly once.
+pub fn run_query(fs: &FsReadCap, q: Query) -> Result[Int, String] {
+    let filt: String = q.filter;
+    let path: String = q.path;
+    let compact: Bool = q.compact;
+    let exit_status: Bool = q.exit_status;
+    let mut src: String = "";
+    match read_source(fs, path) {
+        Err(e) => { return Err(e); }
+        Ok(text) => { src = text; }
+    }
+    let mut doc: JDoc = jdoc_new();
+    match parse_document(src) {
+        Err(e) => { return Err(e); }
+        Ok(d) => { doc = d; }
+    }
+    let mut out_doc: JDoc = doc;
+    let mut roots: List[Int] = list_new();
+    match filter_eval(doc, filt) {
+        Err(e) => { return Err("filter \"" + filt + "\": " + e); }
+        Ok(r) => { out_doc = r.doc; roots = r.out; }
+    }
+    if list_len(roots) == 0 {
+        if exit_status { return Ok(4); }
+        return Ok(1);
+    }
+    let mut text: String = render_stream(out_doc, roots, compact);
+    if q.raw { text = render_raw_stream(out_doc, roots, compact); }
+    print(text + "\n");
+    // With -e the status reports the last value, which is what jq means by it:
+    // false and null are 1, and 4 is reserved for never having produced one.
+    if exit_status {
+        let last: Int = list_get(roots, list_len(roots) - 1);
+        let v: JVal = jval_at(out_doc, last);
+        if v.kind == "null" { return Ok(1); }
+        if v.kind == "bool" && !v.bval { return Ok(1); }
+    }
+    return Ok(0);
+}
+
+fn render_help() -> String {
+    return "oojq 0.1.0\n"
+        + "usage: oojq [-c] [-r] [-e] <filter> [file]\n"
+        + "\n"
+        + "Options:\n"
+        + "  -c, --compact-output  write one value per line without spaces\n"
+        + "  -r, --raw-output      write a top level string as its own text, so a\n"
+        + "                        @csv or @tsv row is a row and not a quoted one\n"
+        + "  -e, --exit-status     1 when the last value was false or null, 4 when\n"
+        + "                        nothing was ever produced, as in jq\n"
+        + "\n"
+        + "Filters:\n"
+        + "  .              the whole document\n"
+        + "  .name         one member of an object\n"
+        + "  .a.b          a chain of members\n"
+        + "  .[]           every child of an array or object\n"
+        + "  .a[]          every child of a member\n"
+        + "  a | b          run b over each result of a\n"
+        + "  a, b           both results, in order\n"
+        + "  a // b         a, or b when a is false or null\n"
+        + "  .a[0]         index an array, negative counts back\n"
+        + "  .a[1:3]       slice an array or string\n"
+        + "  if a then b else c end\n"
+        + "  [a, b]        collect every result into one array\n"
+        + "  a + b         + - * / % on numbers, or + on strings and arrays\n"
+        + "  a == b        == != < <= > >=, or and not\n"
+        + "  map(f) select(f) any(f) all(f) group_by(f) sort unique\n"
+        + "  paths [..]    every path in the document\n"
+        + "\n"
+        + "A member that is absent is null, as in jq.\n"
+        + "Exit codes: 0 values printed, 1 filter selected nothing, 2 trouble.\n";
+}
+
+fn render_usage(reason: String) -> String {
+    return "oojq: " + reason + "\n"
+        + "usage: oojq [-c] [-r] [-e] <filter> [file]\n"
+        + "try 'oojq --help'\n";
+}

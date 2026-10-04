@@ -1,0 +1,140 @@
+// # Leaf Builtins
+//
+// Logline: Runs the builtins that answer from one value in hand, with at most one literal argument.
+//
+// Setup: Pure, no capability needed. A builtin whose argument is itself a filter would need the evaluator, so those live one page up; everything here needs nothing but the value in front of it.
+// Beats:
+//   1. Name the builtins the hub answers off its own list, because reading their argument is not the one job it does.
+//   2. Dispatch a builtin that takes one literal, and refuse a missing or empty one by name.
+//   3. Walk a value at a time, carrying the arena along, so each field is read only once.
+
+import "filter/select_node.oo";
+import "filter/builtin/anchor.oo";
+import "filter/eval/leaf/leaf_step.oo";
+import "filter/run/eval_suggest.oo";
+import "filter/run/eval_sort.oo";
+import "filter/run/eval_path.oo";
+
+fn arg_text(doc: JDoc, arg: Int) -> String {
+    if arg < 0 { return ""; }
+    let v: JVal = jval_at(doc, arg);
+    if v.kind == "string" { return v.sval; }
+    if v.kind == "int" { return v.ival.to_string(); }
+    if v.kind == "float" { return v.sval; }
+    return "";
+}
+
+// A builtin whose argument is written as a literal needs that literal to be
+// evaluated before it can be used. Most of them cannot do without it; flatten
+// has a sensible meaning without one, so the two questions are kept apart.
+fn needs_literal(name: String) -> Bool {
+    return name == "has" || name == "join" || name == "startswith" || name == "endswith"
+        || name == "contains" || name == "ltrimstr" || name == "test" || name == "range"
+        || name == "flatten" || name == "index" || name == "rindex"
+        || name == "split" || name == "rtrimstr" || name == "error";
+}
+
+fn requires_arg(name: String) -> Bool {
+    return name == "has" || name == "join" || name == "startswith" || name == "endswith"
+        || name == "contains" || name == "ltrimstr" || name == "test" || name == "range"
+        || name == "split" || name == "rtrimstr" || name == "getpath";
+}
+
+// The builtins the hub answers off its own list, because reading their argument
+// is not the one job it does: sorting orders whole values, a path is read as
+// text rather than evaluated, and the four path walks are per value.
+pub fn is_routed(builtin: String) -> Bool {
+    if builtin == "paths" { return true; }
+    if builtin == "leaf_paths" { return true; }
+    if builtin == "sort" { return true; }
+    if builtin == "unique" { return true; }
+    if builtin == "path" || builtin == "del" { return true; }
+    return false;
+}
+
+pub fn route_builtin(doc: JDoc, input: List[Int], builtin: String, body: String) -> Result[SRes, String] {
+    if builtin == "paths" || builtin == "leaf_paths" { return paths_each(doc, input, builtin == "leaf_paths", body); }
+    // sort and unique order whole values, so they need the real comparator.
+    if builtin == "sort" { return sort_over(doc, input); }
+    if builtin == "unique" { return unique_over(doc, input); }
+    if builtin == "range" { return range_over(doc, body); }
+    if builtin == "path" || builtin == "del" { return path_builtin(doc, input, builtin, body); }
+    return run_leaf(doc, input, builtin, 0 - 1);
+}
+fn one_step_arg(doc: JDoc, here: Int, w: String, t: String, arg: Int) -> Result[SRes, String] {
+    // error is the one builtin here that is valid with no argument at all, and
+    // jq then reports the value in hand. Reading arg when it is -1 is an out of
+    // bounds read, which came back as no output and no message at all, so the
+    // value in hand is used instead.
+    if w == "error" {
+        if arg < 0 { return builtin_error(doc, here); }
+        return builtin_error(doc, arg);
+    }
+    if w == "has" { return builtin_has(doc, here, t); }
+    if w == "join" { return builtin_join(doc, here, t); }
+    if w == "startswith" { return builtin_startswith(doc, here, t); }
+    if w == "endswith" { return builtin_endswith(doc, here, t); }
+    if w == "contains" { return builtin_contains(doc, here, t); }
+    if w == "ltrimstr" { return builtin_ltrimstr(doc, here, t); }
+    if w == "test" { return builtin_test(doc, here, t); }
+    if w == "flatten" { return builtin_flatten(doc, here, t); }
+    if w == "index" { return builtin_index(doc, here, t); }
+    if w == "rindex" { return builtin_rindex(doc, here, t); }
+    if w == "split" { return builtin_split(doc, here, t); }
+    if w == "rtrimstr" { return builtin_rtrimstr(doc, here, t); }
+    return Err("unknown builtin \"" + w + "\"");
+}
+
+fn step(doc: JDoc, here: Int, w: String, t: String, arg: Int) -> Result[SRes, String] {
+    if needs_literal(w) { return one_step_arg(doc, here, w, t, arg); }
+    return one_step(doc, here, w);
+}
+
+fn walk(doc: JDoc, input: List[Int], w: String, t: String, arg: Int) -> Result[SRes, String] {
+    let mut out: List[Int] = list_new();
+    let mut live: JDoc = doc;
+    let mut i: Int = 0;
+    while i < list_len(input) {
+        let here: Int = list_get(input, i);
+        let r: Result[SRes, String] = step(live, here, w, t, arg);
+        match r {
+            Err(e) => { return Err(e); }
+            Ok(v) => { live = v.doc; out = concat_indices(out, v.out); }
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+// Whether an argument was written at all is decided by the node, not by its
+// text. join("") and ltrimstr("") are both real calls, and reading the empty
+// text as "none given" refused them. An argument that is not a scalar is a
+// different thing again, and is refused rather than read as an empty one,
+// because contains(["x"]) must not quietly become contains("").
+pub fn run_leaf(doc: JDoc, input: List[Int], name: String, arg: Int) -> Result[SRes, String] {
+    // The name is checked before the argument, because a name this build has
+    // never heard of is the more useful thing to say. Reporting the argument
+    // first would answer "needs a scalar literal argument" for what is really
+    // a misspelling, and lose the correction.
+    if !is_known(name) { return Err(unknown_msg(name)); }
+    if arg < 0 {
+        if requires_arg(name) { return Err("\"" + name + "\" needs a literal argument"); }
+        return walk(doc, input, name, "", arg);
+    }
+    let v: JVal = jval_at(doc, arg);
+    // getpath and error are the two builtins whose argument may be a container,
+    // because a path is data and a message is any value at all. Everything else
+    // still refuses a non scalar, so that contains(["x"]) cannot be read as
+    // contains("").
+    if v.kind == "array" {
+        if name != "getpath" && name != "error" {
+            return Err("\"" + name + "\" needs a scalar literal argument");
+        }
+        return walk(doc, input, name, "", arg);
+    }
+    if v.kind != "string" && v.kind != "int" && v.kind != "float" {
+        return Err("\"" + name + "\" needs a scalar literal argument");
+    }
+    let t: String = arg_text(doc, arg);
+    return walk(doc, input, name, t, arg);
+}

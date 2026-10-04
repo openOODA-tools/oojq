@@ -1,0 +1,93 @@
+// # Integer Decode From Byte Range
+//
+// Logline: Turns the byte range the std parser reports for a number into an Int.
+//
+// Setup: Pure, no capability needed. std/core/encoding/json_zero_copy.oo stores the end offset in JsonValue.num and never materialises the digits, so this page is the only place a numeric value becomes a number.
+//
+// Beats:
+//   1. Read an optional leading minus, then at least one decimal digit.
+//   2. Refuse anything else, so a bad literal is an error and not a silent zero.
+//   3. Say whether a digit run fits an Int, and hand one back as text, so a
+//      literal too large for an Int is kept exactly instead of wrapping.
+
+import "buffer_from_text.oo";
+
+pub fn decode_digit(b: Int) -> Int {
+    if b >= 48 && b <= 57 { return b - 48; }
+    return 0 - 1;
+}
+
+pub fn is_digit_byte(b: Int) -> Bool {
+    return decode_digit(b) >= 0;
+}
+
+// 9223372036854775807 is the largest value an Int holds, and 19 digits is the
+// most it can spell. A run longer than that cannot be one, and a 19 digit run
+// is compared against this one to say which side of it the run falls.
+pub fn fits_int_text(s: String) -> Bool {
+    let top: String = "9223372036854775807";
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    if i < n && char_at(s, 0) == "-" { i = i + 1; }
+    let digits: Int = n - i;
+    if digits < 19 { return true; }
+    if digits > 19 { return false; }
+    let mut k: Int = 0;
+    while k < 19 {
+        let got: Int = decode_digit(byte_at(char_at(s, i + k), 0));
+        let lim: Int = decode_digit(byte_at(char_at(top, k), 0));
+        if got < lim { return true; }
+        if got > lim { return false; }
+        k = k + 1;
+    }
+    return true;
+}
+
+// The digits of a byte range as they were written, minus and all. A number is
+// nothing but these, so a value kept as text is the same value an Int would
+// have held, and the two read alike everywhere else.
+pub fn number_text(buf: List[Int], start: Int, end: Int) -> String {
+    let alphabet: String = "0123456789";
+    let mut out: String = "";
+    let mut i: Int = start;
+    while i < end {
+        let b: Int = buffer_byte_at(buf, i);
+        if b == 45 { out = out + "-"; }
+        let d: Int = decode_digit(b);
+        if d >= 0 { out = out + char_at(alphabet, d); }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn decode_number(buf: List[Int], start: Int, end: Int) -> Result[Int, String] {
+    if end <= start {
+        return Err("empty number");
+    }
+    let mut i: Int = start;
+    let mut neg: Bool = false;
+    let first: Int = buffer_byte_at(buf, i);
+    if first == 45 {
+        neg = true;
+        i = i + 1;
+    }
+    if i >= end {
+        return Err("number is a lone minus sign");
+    }
+    let mut acc: Int = 0;
+    let mut seen: Bool = false;
+    while i < end {
+        let d: Int = decode_digit(buffer_byte_at(buf, i));
+        if d < 0 { return Err("non-digit inside number"); }
+        acc = acc * 10 + d;
+        seen = true;
+        i = i + 1;
+    }
+    if !seen {
+        return Err("number has no digits");
+    }
+    if neg {
+        return Ok(0 - acc);
+    }
+    return Ok(acc);
+}

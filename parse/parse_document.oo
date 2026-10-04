@@ -1,0 +1,141 @@
+// # Parse JSON Text Into The Value Arena
+//
+// Logline: Walks the std parser's offset tree and emits oojq's flat node arena.
+//
+// Setup: Reads nothing and writes nothing; the caller supplies text. Malformed
+// input becomes a located error string, never a partial tree.
+// Beats:
+//   1. Recurse over jzc_parse_value, converting child byte offsets into node
+//      indices so the arena is built in document order.
+//   2. Pair an object's children, which arrive as alternating key then value.
+//   3. Decode an integer from the byte range jzc reports, or recover the
+//      original text of a float from the shadow table.
+
+import "value_tree.oo";
+import "buffer_from_text.oo";
+import "unescape_unicode.oo";
+import "decode_number.oo";
+import "float_scan.oo";
+import "std/core/encoding/json_zero_copy.oo";
+
+type PCtx = struct {
+    buf: List[Int],
+    spans: List[FSpan]
+};
+
+fn parse_error(off: Int, detail: String) -> String {
+    return "parse error at byte " + off.to_string() + ": " + detail;
+}
+
+// A float keeps the digits std's span scanner found, and an integer too large
+// for an Int keeps its own text the same way. Both are the same kind of node, so
+// a value read back is the value written: 18446744073709551615 decodes to -1
+// through decode_number, and asking fits_int_text first is what stops that.
+fn parse_number(ctx: PCtx, doc: JDoc, off: Int, jv: JsonValue) -> Result[PRes, String] {
+    let end: Int = jzc_int(jv);
+    let literal: String = find_float(ctx.spans, off);
+    if chars_len(literal) > 0 {
+        return Ok(jdoc_push(doc, jval_float(literal)));
+    }
+    let text: String = number_text(ctx.buf, off, end);
+    if !fits_int_text(text) {
+        return Ok(jdoc_push(doc, jval_float(text)));
+    }
+    match decode_number(ctx.buf, off, end) {
+        Err(e) => { return Err(parse_error(off, e)); }
+        Ok(v) => { return Ok(jdoc_push(doc, jval_int(v))); }
+    }
+}
+
+fn parse_array(ctx: PCtx, doc: JDoc, jv: JsonValue) -> Result[PRes, String] {
+    let offsets: List[Int] = jv.children;
+    let mut cur: JDoc = doc;
+    let mut kids: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(offsets) {
+        match parse_node(ctx, cur, list_get(offsets, i)) {
+            Err(e) => { return Err(e); }
+            Ok(r) => {
+                cur = r.doc;
+                kids = list_push(kids, r.idx);
+            }
+        }
+        i = i + 1;
+    }
+    return Ok(jdoc_push(cur, jval_array(kids)));
+}
+
+fn parse_object(ctx: PCtx, doc: JDoc, off: Int, jv: JsonValue) -> Result[PRes, String] {
+    let offsets: List[Int] = jv.children;
+    if list_len(offsets) % 2 != 0 {
+        return Err(parse_error(off, "object has an odd number of members"));
+    }
+    let mut cur: JDoc = doc;
+    let mut keys: List[String] = list_new();
+    let mut kids: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(offsets) {
+        let koff: Int = list_get(offsets, i);
+        let voff: Int = list_get(offsets, i + 1);
+        match jzc_parse_value(ctx.buf, koff) {
+            Err(e) => { return Err(parse_error(koff, e)); }
+            Ok(kv) => {
+                if jzc_kind(kv) != "string" {
+                    return Err(parse_error(koff, "object key is not a string"));
+                }
+                keys = list_push(keys, jzc_str(kv));
+            }
+        }
+        match parse_node(ctx, cur, voff) {
+            Err(e) => { return Err(e); }
+            Ok(r) => {
+                cur = r.doc;
+                kids = list_push(kids, r.idx);
+            }
+        }
+        i = i + 2;
+    }
+    return Ok(jdoc_push(cur, jval_object(keys, kids)));
+}
+
+fn parse_node(ctx: PCtx, doc: JDoc, off: Int) -> Result[PRes, String] {
+    match jzc_parse_value(ctx.buf, off) {
+        Err(e) => { return Err(parse_error(off, e)); }
+        Ok(jv) => {
+            let k: String = jzc_kind(jv);
+            if k == "object" { return parse_object(ctx, doc, off, jv); }
+            if k == "array" { return parse_array(ctx, doc, jv); }
+            if k == "string" { return Ok(jdoc_push(doc, jval_string(jzc_str(jv)))); }
+            if k == "number" { return parse_number(ctx, doc, off, jv); }
+            if k == "true" { return Ok(jdoc_push(doc, jval_bool(true))); }
+            if k == "false" { return Ok(jdoc_push(doc, jval_bool(false))); }
+            return Ok(jdoc_push(doc, jval_empty("null")));
+        }
+    }
+}
+
+pub fn parse_document(src: String) -> Result[JDoc, String] {
+    // A \u escape is rewritten into the bytes it stands for first, because the
+    // std reader refuses one. This replaces the plain text buffer outright, so
+    // a byte offset in an error names the rewritten text, which is the only
+    // place the escape can still be pointed at.
+    let raw: List[Int] = unescape_unicode(src);
+    let hint: String = buffer_preview(raw, 0, buffer_len(raw));
+    let sh: Shadow = build_shadow(raw);
+    let ctx: PCtx = PCtx { buf: sh.buf, spans: sh.floats };
+    match jzc_parse(ctx.buf) {
+        Err(e) => {
+            return Err("parse error: " + e + "\nhint: " + hint);
+        }
+        Ok(jv) => {
+            match parse_node(ctx, jdoc_new(), 0) {
+                Err(e) => { return Err(e); }
+                Ok(r) => {
+                    let mut d: JDoc = r.doc;
+                    d.root = r.idx;
+                    return Ok(d);
+                }
+            }
+        }
+    }
+}

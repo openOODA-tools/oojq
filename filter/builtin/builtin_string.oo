@@ -1,0 +1,231 @@
+// # String And Argument Builtins
+//
+// Logline: Implements the jq builtins that take one literal argument.
+//
+// Setup: Pure, no capability needed. Each reads the arena and returns nodes, so
+// a builtin composes with path steps like any access.
+// Beats:
+//   1. Membership and size: has, range.
+//   2. String tests and rewrites: startswith, endswith, ltrimstr, contains,
+//      ascii_downcase, ascii_upcase, test.
+//   3. Conversions and numeric extremes: tostring, tonumber, min, max.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "filter/syntax/scan/parse_span.oo";
+import "render/render_value.oo";
+import "std/core/primitives/str.oo";
+import "std/core/text/regex.oo";
+
+// has reports whether an object carries a member. jq refuses has on an array
+// outright, because an array index is a number and a member name is a string.
+pub fn builtin_has(doc: JDoc, idx: Int, key: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "object" {
+        let mut i: Int = 0;
+        while i < list_len(v.keys) {
+            if list_get(v.keys, i) == key {
+                return Ok(bool_result(doc, true));
+            }
+            i = i + 1;
+        }
+        return Ok(bool_result(doc, false));
+    }
+    return Err("has needs an object, not a " + v.kind);
+}
+
+// range(n) emits each value as its own output rather than collecting an array,
+// which is what jq does. Wrapping it in brackets is the caller's job.
+pub fn builtin_range(doc: JDoc, n: Int) -> SRes {
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let p: PRes = jdoc_push(live, jval_int(i));
+        live = p.doc;
+        out = list_push(out, p.idx);
+        i = i + 1;
+    }
+    return SRes { doc: live, out: out };
+}
+pub fn builtin_startswith(doc: JDoc, idx: Int, pre: String) -> Result[SRes, String] {
+    return Ok(bool_result(doc, str_starts_with(str_of(doc, idx), pre)));
+}
+pub fn builtin_endswith(doc: JDoc, idx: Int, suf: String) -> Result[SRes, String] {
+    let s: String = str_of(doc, idx);
+    let n: Int = chars_len(s);
+    let m: Int = chars_len(suf);
+    if m > n {
+        return Ok(bool_result(doc, false));
+    }
+    let tail: String = str_slice(s, n - m, n);
+    return Ok(bool_result(doc, suf == tail));
+}
+
+// contains is jq's subsequence test for strings and a subset test for arrays.
+pub fn builtin_contains(doc: JDoc, idx: Int, needle: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "string" {
+        let hay: String = v.sval;
+        let n: Int = chars_len(hay);
+        let m: Int = chars_len(needle);
+        if m == 0 { return Ok(bool_result(doc, true)); }
+        let mut i: Int = 0;
+        while i + m <= n {
+            if str_slice(hay, i, i + m) == needle {
+                return Ok(bool_result(doc, true));
+            }
+            i = i + 1;
+        }
+        return Ok(bool_result(doc, false));
+    }
+    if v.kind == "array" {
+        let mut i: Int = 0;
+        while i < list_len(v.kids) {
+            let e: JVal = jval_at(doc, list_get(v.kids, i));
+            if e.kind == "string" && e.sval == needle {
+                return Ok(bool_result(doc, true));
+            }
+            i = i + 1;
+        }
+    }
+    return Ok(bool_result(doc, false));
+}
+
+fn str_of(doc: JDoc, idx: Int) -> String {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "string" {
+        return v.sval;
+    }
+    return "";
+}
+pub fn builtin_ltrimstr(doc: JDoc, idx: Int, pre: String) -> Result[SRes, String] {
+    let s: String = str_of(doc, idx);
+    if str_starts_with(s, pre) {
+        return Ok(str_result(doc, str_slice(s, chars_len(pre), chars_len(s))));
+    }
+    return Ok(str_result(doc, s));
+}
+
+// ascii_downcase and ascii_upcase touch ASCII letters only, which is what jq's
+// ascii_ variants promise. Every other character passes through unchanged.
+pub fn builtin_downcase(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let upper: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let lower: String = "abcdefghijklmnopqrstuvwxyz";
+    let s: String = str_of(doc, idx);
+    let n: Int = chars_len(s);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        let here: Int = index_of_char(upper, c);
+        if here >= 0 {
+            out = out + char_at(lower, here);
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return Ok(str_result(doc, out));
+}
+
+pub fn builtin_upcase(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let upper: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let lower: String = "abcdefghijklmnopqrstuvwxyz";
+    let s: String = str_of(doc, idx);
+    let n: Int = chars_len(s);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        let here: Int = index_of_char(lower, c);
+        if here >= 0 {
+            out = out + char_at(upper, here);
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return Ok(str_result(doc, out));
+}
+fn index_of_char(s: String, c: String) -> Int {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(s, i) == c {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+pub fn builtin_tostring(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    // A container has no scalar spelling of its own, so jq writes it as the
+    // same compact JSON it would print. Answering with an empty string instead
+    // would turn every @text over a structure into "".
+    return Ok(str_result(doc, render_as_text(doc, idx)));
+}
+
+// tonumber parses digits only. A float literal cannot be converted because the
+// language has no Float to String path yet, so it is refused by name.
+pub fn builtin_tonumber(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "int" || v.kind == "float" {
+        return Ok(SRes { doc: doc, out: one(idx) });
+    }
+    if v.kind != "string" {
+        return Err("tonumber needs a string, not a " + v.kind);
+    }
+    let s: String = trim_ws(v.sval);
+    let r: Result[Int, String] = parse_int(s);
+    match r {
+        Err(e) => { return Err("tonumber cannot read \"" + v.sval + "\""); }
+        Ok(i) => { return Ok(int_result(doc, i)); }
+    }
+}
+
+// The std NFA reads a pattern one character at a time and has no notion of an
+// escape, a group, a counted repetition, a class range, or a negated class.
+// \d is the two characters backslash and d, (ab)c is the five characters they
+// look like, a{1} is three, [a-z] is the set {a, -, z}, and [^a] is {^, a}. The
+// validator accepts every one of those as well formed, so the engine answered a
+// confident false, or a confident true, where jq answers the other way. A
+// false from test drops the rows it was meant to keep, which is worse than
+// saying nothing, so a pattern this engine cannot honour is named and refused.
+// Literals, ., *, +, ?, |, ^, $, and a plain [abc] all go through untouched.
+pub fn pattern_gap(pattern: String) -> String {
+    let n: Int = chars_len(pattern);
+    let mut in_class: Bool = false;
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(pattern, i);
+        if in_class {
+            if c == "]" { in_class = false; }
+            else if c == "-" { return "character range such as a-z"; }
+            else if c == "^" { return "negated character class such as [^a]"; }
+            else if c == "\\" { return "escape inside a character class"; }
+        } else {
+            if c == "[" { in_class = true; }
+            else if c == "\\" { return "escape such as \\d or \\."; }
+            else if c == "(" || c == ")" { return "group such as (ab)"; }
+            else if c == "{" || c == "}" { return "counted repetition such as a{2}"; }
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// test uses the std regex engine, behind the guard above.
+pub fn builtin_test(doc: JDoc, idx: Int, pattern: String) -> Result[SRes, String] {
+    let gap: String = pattern_gap(pattern);
+    if chars_len(gap) > 0 {
+        return Err("test(" + pattern + ") is not supported: the std regex engine has no "
+            + gap + ", and matching it anyway would answer wrongly rather than refuse");
+    }
+    let s: String = str_of(doc, idx);
+    match regex_compile(pattern) {
+        Err(e) => { return Err("test: bad pattern " + pattern + ": " + e); }
+        Ok(re) => { return Ok(bool_result(doc, regex_is_match(re, s))); }
+    }
+}

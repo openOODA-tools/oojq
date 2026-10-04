@@ -1,0 +1,68 @@
+// # Render String Escaping
+//
+// Logline: Escapes a JSON string value, including every control byte below 0x20.
+//
+// Setup: Pure, no capability needed. std/core/format/json_writer.oo escapes only quote, backslash, and the three common whitespace bytes, so a raw 0x01 would reach the output unescaped and corrupt the document.
+//
+// Beats:
+//   1. Map the seven short escapes JSON defines to their two byte forms.
+//   2. Fall back to a \u00XX form for any other byte below 0x20.
+//   3. Copy a multi byte character through whole, so UTF-8 text survives.
+
+pub fn hex_digit(v: Int) -> String {
+    let digits: String = "0123456789abcdef";
+    if v < 0 || v > 15 { return "0"; }
+    return char_at(digits, v);
+}
+
+pub fn render_string(s: String) -> String {
+    // chars_len counts characters and byte_at counts bytes, so the two only
+    // line up one byte at a time. Walking characters keeps a multi byte one
+    // whole, which is what stopped a trailing byte being dropped.
+    let n: Int = chars_len(s);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(s, i);
+        let b: Int = byte_at(ch, 0) & 255;
+        if b >= 194 && b < 245 {
+            out = out + ch;
+        } else {
+            out = out + escape_byte(b);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn escape_byte(b: Int) -> String {
+    if b == 34 { return "\\\""; }
+    if b == 92 { return "\\\\"; }
+    if b == 8 { return "\\b"; }
+    if b == 12 { return "\\f"; }
+    if b == 10 { return "\\n"; }
+    if b == 13 { return "\\r"; }
+    if b == 9 { return "\\t"; }
+    if b < 32 {
+        return "\\u00" + hex_digit((b / 16) % 16) + hex_digit(b % 16);
+    }
+    return char_at_byte(b);
+}
+
+// Printable ASCII passes through unchanged. Anything from 0x7f up is emitted as
+// a unicode escape rather than a raw byte, so a delete or a byte the reader
+// could not decode never reaches the output as text.
+fn char_at_byte(b: Int) -> String {
+    if b >= 32 && b < 127 {
+        return char_at(printable_table(), b - 32);
+    }
+    if b >= 127 {
+        return "\\u" + hex_digit((b / 4096) % 16) + hex_digit((b / 256) % 16)
+            + hex_digit((b / 16) % 16) + hex_digit(b % 16);
+    }
+    return " ";
+}
+
+fn printable_table() -> String {
+    return " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+}

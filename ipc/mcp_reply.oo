@@ -1,0 +1,93 @@
+// # MCP Reply Envelope
+//
+// Logline: Reads the fields of a JSON-RPC request and writes the answer back in the same shape.
+//
+// Setup: Pure, no capability needed. Reading a request uses the filter evaluator, so the server parses its own protocol with the engine it ships.
+// Beats:
+//   1. Probe a field by asking the evaluator for it, which keeps one JSON reader instead of two.
+//   2. Echo the id back as the same JSON it arrived as, so a number stays a number.
+//   3. Build a result or an error as text, because the shape is fixed and the payload is already rendered.
+
+import "parse/anchor.oo";
+import "filter/filter_eval.oo";
+import "render/render_value.oo";
+import "render/render_string.oo";
+
+// The JSON text of whatever sits at a path, or "" when the path selects nothing.
+// Rendering the node rather than reading a field is what keeps a string id
+// quoted and a numeric id bare without this page knowing which is which.
+pub fn mcp_probe(doc: JDoc, path: String) -> String {
+    let got: Result[SRes, String] = filter_eval(doc, path);
+    match got {
+        Err(e) => { return ""; }
+        Ok(r) => {
+            let live: JDoc = r.doc;
+            let found: List[Int] = r.out;
+            if list_len(found) == 0 { return ""; }
+            let here: Int = list_get(found, list_len(found) - 1);
+            let text: String = render_stream(live, one(here), true);
+            return text;
+        }
+    }
+}
+
+// A request with no id is a notification and gets no answer at all. A null id is
+// treated the same way, which is what every client sends for a notification.
+pub fn mcp_wants_reply(doc: JDoc) -> Bool {
+    let id: String = mcp_probe(doc, ".id");
+    if chars_len(id) == 0 { return false; }
+    if id == "null" { return false; }
+    return true;
+}
+
+pub fn mcp_id_of(doc: JDoc) -> String {
+    return mcp_probe(doc, ".id");
+}
+
+pub fn mcp_method_of(doc: JDoc) -> String {
+    let text: String = mcp_probe(doc, ".method");
+    if text == "null" { return ""; }
+    if !starts_with(text, "\"") { return text; }
+    return str_slice(text, 1, chars_len(text) - 1);
+}
+
+// A string field, decoded. Reading it off the node rather than out of the
+// rendered JSON is what unescapes it: cutting the quotes off a rendered string
+// leaves \" behind, so a filter argument containing a quote arrives mangled.
+pub fn mcp_text_field(doc: JDoc, path: String) -> String {
+    let got: Result[SRes, String] = filter_eval(doc, path);
+    match got {
+        Err(e) => { return ""; }
+        Ok(r) => {
+            let live: JDoc = r.doc;
+            let found: List[Int] = r.out;
+            if list_len(found) == 0 { return ""; }
+            let here: Int = list_get(found, list_len(found) - 1);
+            let v: JVal = jval_at(live, here);
+            if v.kind != "string" { return ""; }
+            // Bound to a local before it is returned. Handing a struct field
+            // straight back out of a function took the process down with it, and
+            // only on the path where the field was actually present.
+            let text: String = v.sval;
+            return text;
+        }
+    }
+}
+
+pub fn mcp_result(id: String, payload: String) -> String {
+    return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + payload + "}";
+}
+
+pub fn mcp_error(id: String, code: Int, message: String) -> String {
+    return "{\"jsonrpc\":\"2.0\",\"id\":" + id
+        + ",\"error\":{\"code\":" + code.to_string()
+        + ",\"message\":\"" + render_string(message) + "\"}}";
+}
+
+// A quoted JSON string carrying arbitrary rendered output, which is how a tool
+// returns a result that is text rather than structure. render_string returns the
+// escaped body and no quotes of its own, so the quotes are added here; leaving
+// them out emits a reply no JSON parser will accept.
+pub fn mcp_text_payload(text: String) -> String {
+    return "{\"content\":[{\"type\":\"text\",\"text\":\"" + render_string(text) + "\"}]}";
+}

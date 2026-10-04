@@ -1,0 +1,246 @@
+// # Paths Through A Value
+//
+// Logline: Walks a value and mints the path that reaches each node beneath it, and reads a written path back to name and to remove.
+//
+// Setup: Pure, no capability needed. A path is a real array node built from string and number nodes, so it renders as JSON and compares like any other value.
+// Beats:
+//   1. Visit every node below the one in hand, depth first and parent first.
+//   2. Build each path by extending its parent's, so a path is a value of its own.
+//   3. Turn a literal path expression into that array, and walk it back to remove what it names.
+
+import "filter/select_node.oo";
+import "filter/syntax/parse_path.oo";
+import "filter/syntax/scan/parse_span.oo";
+import "parse/anchor.oo";
+import "std/core/primitives/str.oo";
+
+// A child node and the arena that child was minted into, which have to travel
+// together: a node index means nothing without the document it indexes.
+type Pair = struct {
+    doc: JDoc,
+    node: Int
+};
+
+fn is_branch(v: JVal) -> Bool {
+    return v.kind == "array" || v.kind == "object";
+}
+
+fn path_step(keys: List[Int], k: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(keys) {
+        out = list_push(out, list_get(keys, i));
+        i = i + 1;
+    }
+    return list_push(out, k);
+}
+
+// Every node minted here has to be minted into the arena the caller keeps, so
+// the grown arena travels back out with the paths. An object is walked in the
+// order its members were written, which is the order jq prints paths in.
+fn walk_below(doc: JDoc, node: Int, keys: List[Int], want_leaf: Bool, acc: List[Int]) -> SRes {
+    let v: JVal = jval_at(doc, node);
+    if !is_branch(v) { return SRes { doc: doc, out: acc }; }
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = acc;
+    let mut i: Int = 0;
+    while i < list_len(v.kids) {
+        let kid: Int = list_get(v.kids, i);
+        let mut label: Int = 0;
+        if v.kind == "object" {
+            let named: PRes = jdoc_push(live, jval_string(list_get(v.keys, i)));
+            live = named.doc;
+            label = named.idx;
+        } else {
+            let pos: PRes = jdoc_push(live, jval_int(i));
+            live = pos.doc;
+            label = pos.idx;
+        }
+        let here: List[Int] = path_step(keys, label);
+        let deeper: Bool = is_branch(jval_at(live, kid));
+        if !want_leaf || !deeper {
+            let made: SRes = array_result(live, here);
+            live = made.doc;
+            out = concat_indices(out, made.out);
+        }
+        if deeper {
+            let rest: SRes = walk_below(live, kid, here, want_leaf, out);
+            live = rest.doc;
+            out = rest.out;
+        }
+        i = i + 1;
+    }
+    return SRes { doc: live, out: out };
+}
+
+pub fn walk_paths(doc: JDoc, idx: Int, want_leaf: Bool) -> SRes {
+    return walk_below(doc, idx, list_new(), want_leaf, list_new());
+}
+
+// paths(f) and leaf_paths(f) keep the paths f is true of. This page cannot
+// reach the evaluator, so it cannot ask f of a value, and answering with every
+// path is what it used to do: [paths(.=="a")] was all sixteen paths where jq
+// gives the two. A named refusal beats a confident wrong answer.
+pub fn paths_each(doc: JDoc, input: List[Int], want_leaf: Bool, body: String) -> Result[SRes, String] {
+    if chars_len(body) > 0 {
+        let mut name: String = "paths";
+        if want_leaf { name = "leaf_paths"; }
+        return Err(name + "(f) is not supported: the path walk cannot evaluate f, and answering with every path would be wrong rather than refused");
+    }
+    let mut out: List[Int] = list_new();
+    let mut live: JDoc = doc;
+    let mut i: Int = 0;
+    while i < list_len(input) {
+        let r: SRes = walk_paths(live, list_get(input, i), want_leaf);
+        live = r.doc;
+        out = concat_indices(out, r.out);
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+// One step as the value jq writes it: a name is a string and a position is a
+// whole number, which is why the letter parse_path put in front is read here
+// and nowhere else.
+fn step_value(step: String) -> JVal {
+    let body: String = str_slice(step, 2, chars_len(step));
+    if char_at(step, 0) == "s" { return jval_string(body); }
+    return jval_int(parse_int_digits(body));
+}
+
+// One path array, minted into the arena the caller keeps, so it is a value of
+// its own and renders as the JSON jq renders.
+fn path_node(doc: JDoc, parts: List[String]) -> SRes {
+    let mut live: JDoc = doc;
+    let mut kids: List[Int] = list_new();
+    let mut k: Int = 0;
+    while k < list_len(parts) {
+        let v: JVal = step_value(list_get(parts, k));
+        let p: PRes = jdoc_push(live, v);
+        live = p.doc;
+        kids = list_push(kids, p.idx);
+        k = k + 1;
+    }
+    return array_result(live, kids);
+}
+
+// The steps after the first, which is what the next step down has to match.
+fn rest_of(parts: List[String]) -> List[String] {
+    let n: Int = list_len(parts);
+    let mut out: List[String] = list_new();
+    let mut i: Int = 1;
+    while i < n {
+        out = list_push(out, list_get(parts, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+// The child to keep, and the arena that child was minted into. A child the
+// path did not name is kept exactly as it is, and only the one the path did
+// name is cut inside. Cutting every child is what made del(.tags[0]) also drop
+// items[0] and nest[0]: the steps after "tags" were handed to every member of
+// the object rather than to the member the path had already matched.
+fn child_kept(live: JDoc, kid: Int, rest: List[String], cut: Bool) -> Pair {
+    if !cut { return Pair { doc: live, node: kid }; }
+    let sub: SRes = del_at(live, kid, rest);
+    let so: List[Int] = sub.out;
+    return Pair { doc: sub.doc, node: list_get(so, 0) };
+}
+
+// The value with one step removed. A path that is not there is a no-op, which
+// is what jq means by del(.missing), and del(.) is null because the last step
+// of a path is the value itself. A step that cannot be taken is a no-op too
+// rather than a refusal: the path named nothing, so there is nothing to remove.
+pub fn del_at(doc: JDoc, node: Int, parts: List[String]) -> SRes {
+    if list_len(parts) == 0 { return null_result(doc); }
+    let v: JVal = jval_at(doc, node);
+    let head: String = list_get(parts, 0);
+    let rest: List[String] = rest_of(parts);
+    let mut live: JDoc = doc;
+    let is_name: Bool = char_at(head, 0) == "s";
+    if v.kind == "object" && is_name {
+        let key: String = str_slice(head, 2, chars_len(head));
+        let mut at: Int = 0 - 1;
+        let mut i: Int = 0;
+        while i < list_len(v.keys) {
+            if list_get(v.keys, i) == key { at = i; }
+            i = i + 1;
+        }
+        if at < 0 { return SRes { doc: doc, out: one(node) }; }
+        let mut keys: List[String] = list_new();
+        let mut kids: List[Int] = list_new();
+        let mut j: Int = 0;
+        while j < list_len(v.keys) {
+            // The matched key goes only when this was the last step. A path with
+            // steps after it keeps the key and cuts inside it, which is the whole
+            // difference between del(.a) and del(.a.b).
+            if j != at || list_len(rest) > 0 {
+                keys = list_push(keys, list_get(v.keys, j));
+                let kept: Pair = child_kept(live, list_get(v.kids, j), rest, j == at);
+                live = kept.doc;
+                kids = list_push(kids, kept.node);
+            }
+            j = j + 1;
+        }
+        return object_result(live, keys, kids);
+    }
+    if v.kind == "array" && !is_name {
+        let body: String = str_slice(head, 2, chars_len(head));
+        let len: Int = list_len(v.kids);
+        let mut at: Int = parse_int_digits(body);
+        if at < 0 { at = len + at; }
+        if at < 0 || at >= len { return SRes { doc: doc, out: one(node) }; }
+        let mut kids: List[Int] = list_new();
+        let mut j: Int = 0;
+        while j < len {
+            if j != at || list_len(rest) > 0 {
+                let kept: Pair = child_kept(live, list_get(v.kids, j), rest, j == at);
+                live = kept.doc;
+                kids = list_push(kids, kept.node);
+            }
+            j = j + 1;
+        }
+        return array_result(live, kids);
+    }
+    return SRes { doc: doc, out: one(node) };
+}
+
+// path and del differ only in what they do with the steps they read, so one
+// entry point answers both and the caller supplies the name. Both are per
+// value: a filter is run once per value, and a path written against a stream is
+// a path for each of them. The alternatives are read inside that loop rather
+// than once outside it, which costs a scan of the same text and keeps every
+// path list a flat list of strings.
+pub fn path_builtin(doc: JDoc, input: List[Int], name: String, body: String) -> Result[SRes, String] {
+    let alts: List[String] = split_top_commas(body);
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(input) {
+        let mut v: Int = list_get(input, i);
+        let mut a: Int = 0;
+        while a < list_len(alts) {
+            let got: Result[List[String], String] = literal_path(list_get(alts, a));
+            match got {
+                Err(e) => { return Err(e); }
+                Ok(parts) => {
+                    if name == "path" {
+                        let made: SRes = path_node(live, parts);
+                        live = made.doc;
+                        out = concat_indices(out, made.out);
+                    } else {
+                        let r: SRes = del_at(live, v, parts);
+                        live = r.doc;
+                        let ro: List[Int] = r.out;
+                        v = list_get(ro, 0);
+                    }
+                }
+            }
+            a = a + 1;
+        }
+        if name != "path" { out = list_push(out, v); }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}

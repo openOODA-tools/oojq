@@ -1,0 +1,84 @@
+// # Arithmetic And Order That Go Through A Double
+//
+// Logline: Runs one operator over two numbers the way hardware does, by reading each side as a binary64, working there, and writing the answer back as text.
+// Setup: Pure, no capability needed. A float in this value tree is its written text, so the first job on every call is turning that text into the sixteen hex digits the float pages speak, and the last is turning the answer back.
+// Beats:
+//   1. Convert both sides with decimal_bits, which is the only correctly rounded decimal to double in the tree.
+//   2. Hand the two words to the one float operation, and refuse an operator this page does not carry.
+//   3. Write the answer back with bits_text, so a computed double is spelled the way jq spells a computed double.
+
+import "parse/value_tree.oo";
+import "filter/select_node.oo";
+import "filter/eval/eval_leaf.oo";
+import "filter/eval/float/float_ops.oo";
+import "filter/eval/float/flt_div.oo";
+import "filter/eval/float/decimal_bits.oo";
+import "filter/eval/float/bits_text.oo";
+
+// An Int keeps its value in ival and leaves sval EMPTY, so reading sval for
+// every number converts a whole number to the empty string, which reads back as
+// zero, and 1.5 * 2 comes to 0. An Int has to be written out of ival.
+fn fo_text(v: JVal) -> String {
+    if v.kind == "int" { return (v.ival).to_string(); }
+    return v.sval;
+}
+
+fn fo_apply(op: String, a: String, b: String) -> Result[String, String] {
+    if op == "+" { return flt_add(a, b); }
+    if op == "-" { return flt_sub(a, b); }
+    if op == "*" { return flt_mul(a, b); }
+    if op == "/" { return flt_div(a, b); }
+    return Err("float_op: no double arithmetic for " + op);
+}
+
+// Either side being a float takes BOTH sides through a double, because that is
+// what jq does and what a C implementation does: an int in a float expression is
+// converted exactly, so 1 + 0.1 is 1.1 and not 1.1 to some other place. The
+// exact decimal path is still right for two ints, and it is the only one that
+// can answer an integer too large for 63 bits, so it keeps both of those.
+pub fn float_binop(doc: JDoc, op: String, x: Int, y: Int) -> Result[SRes, String] {
+    let a: JVal = jval_at(doc, x);
+    let b: JVal = jval_at(doc, y);
+    let ha: Result[String, String] = decimal_bits(fo_text(a));
+    let hb: Result[String, String] = decimal_bits(fo_text(b));
+    match ha {
+        Err(e) => { return Err(e); }
+        Ok(wa) => {
+            match hb {
+                Err(e) => { return Err(e); }
+                Ok(wb) => {
+                    let r: Result[String, String] = fo_apply(op, wa, wb);
+                    match r {
+                        Err(e) => { return Err(e); }
+                        Ok(hex) => {
+                            let t: Result[String, String] = bits_text(hex);
+                            match t {
+                                Err(e) => { return Err(e); }
+                                Ok(body) => { return Ok(float_result(doc, body)); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Ordering does not round anything, so it needs no text back: the two words go
+// in and a sign comes out. It reads the values as exact numbers rather than as
+// words, because ordering two binary64 by their bit patterns is only the same
+// as ordering them by value within a sign, and getting that wrong is the
+// 0.1 < 0.02 sort of answer.
+pub fn float_order(a: JVal, b: JVal) -> Result[Int, String] {
+    let ha: Result[String, String] = decimal_bits(fo_text(a));
+    let hb: Result[String, String] = decimal_bits(fo_text(b));
+    match ha {
+        Err(e) => { return Err(e); }
+        Ok(wa) => {
+            match hb {
+                Err(e) => { return Err(e); }
+                Ok(wb) => { return Ok(flt_cmp(wa, wb)); }
+            }
+        }
+    }
+}

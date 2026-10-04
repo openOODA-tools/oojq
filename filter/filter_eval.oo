@@ -1,0 +1,27 @@
+// # oojq Filter Entry
+//
+// Logline: Takes filter text, parses it into a node tree, and runs that tree over the root of one document.
+//
+// Setup: Pure, no capability needed. This is the whole filter surface: everything below it is either parsing or evaluation.
+// Beats:
+//   1. Refuse a filter that will not parse, with the parser's own message.
+//   2. Seed the run with the document root as a one value stream.
+//   3. Hand back the arena the run ended with, because values may have been minted.
+
+import "filter/ast.oo";
+import "filter/syntax/anchor.oo";
+import "filter/run/anchor.oo";
+
+// The returned arena may hold nodes minted by a slice, a construction, or a
+// built-in, so the caller renders from this document and not the one it parsed.
+pub fn filter_eval(in_doc: JDoc, text: String) -> Result[SRes, String] {
+    let got: Result[POut, String] = parse_filter(text);
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(p) => {
+            let mut input: List[Int] = list_new();
+            input = list_push(input, in_doc.root);
+            return eval_filter(p.ast, p.node, in_doc, input);
+        }
+    }
+}

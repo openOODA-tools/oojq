@@ -1,0 +1,22 @@
+// # Parse Subsystem Anchor - JSON Text To Value Tree
+//
+// Logline: Turns one JSON document into a queryable value tree.
+//
+// Setup: Reads no file itself. std/core/encoding/json_zero_copy.oo supplies the RFC 8259 scanner; this domain converts its byte offsets into node indices.
+//
+// Beats:
+//   1. Parse a complete document and report the root value.
+//   2. Refuse malformed input with a located message, never a partial tree.
+//
+// std reports a number as the offset just past its last digit and never
+// materialises the digits, so decode_number.oo is the only place a literal
+// becomes an Int. It also means a decimal point is invisible to this layer:
+// json_zero_copy stops at the dot and the enclosing container then reports a
+// missing comma, which surfaces as a parse error rather than a wrong value.
+
+import "parse_document.oo";
+import "utf8.oo";
+
+pub fn parse_anchor_status() -> String {
+    return "parse: jzc_parse walk, integers decoded, floats refused";
+}

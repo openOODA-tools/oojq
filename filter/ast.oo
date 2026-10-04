@@ -1,0 +1,173 @@
+// # Filter AST Node Arena
+//
+// Logline: Declares the flat node list a filter parses into and the cursor that walks the filter text.
+//
+// Setup: Pure, no capability needed. Every node is a flat record, so a node never nests another node as a struct field and the arena can grow without invalidating an index.
+// Beats:
+//   1. Name the node kinds the parser emits and the cursor it threads through the text.
+//   2. Give every parser one shape: an arena in, an arena plus a cursor plus a node index out.
+//   3. Keep the child slots fixed width so a node can hold a condition, a branch, and a further branch.
+
+type ANode = struct {
+    kind: String,
+    name: String,
+    sval: String,
+    t1: String,
+    t2: String,
+    ival: Int,
+    a: Int,
+    b: Int
+};
+
+type AList = struct {
+    nodes: List[ANode]
+};
+
+// The parser threads the unconsumed tail of the filter text through every call,
+// because openOODA has no out parameter and no closures to capture one with.
+type Cur = struct {
+    src: String,
+    pos: Int
+};
+
+// What one parser function hands back: the grown arena, where it stopped, and
+// the index of the node it just built. Callers read node and keep threading cur.
+type POut = struct {
+    ast: AList,
+    cur: Cur,
+    node: Int
+};
+
+type ARes = struct {
+    ast: AList,
+    idx: Int
+};
+
+pub fn ast_new() -> AList {
+    return AList { nodes: list_new() };
+}
+
+pub fn ast_at(ast: AList, i: Int) -> ANode {
+    return list_get(ast.nodes, i);
+}
+
+pub fn ast_len(ast: AList) -> Int {
+    return list_len(ast.nodes);
+}
+
+// A fresh node has no children. -1 is the absent child, which no real node index
+// can collide with because indexes start here zero and only grow.
+//
+// A bracketed form such as "(a | b)" or "if c then t end" keeps its body as
+// written in sval, t1, and t2. The parser only has to find where the body
+// ends; the evaluator parses that text when it reaches the node. That is what
+// keeps the parser's call graph a straight line instead of a knot.
+pub fn node_blank(kind: String) -> ANode {
+    let none: Int = 0 - 1;
+    return ANode { kind: kind, name: "", sval: "", t1: "", t2: "", ival: 0, a: none, b: none };
+}
+
+pub fn ast_add(ast: AList, n: ANode) -> ARes {
+    let mut d: AList = ast;
+    let here: Int = list_len(d.nodes);
+    d.nodes = list_push(d.nodes, n);
+    return ARes { ast: d, idx: here };
+}
+
+fn add_one(ast: AList, n: ANode) -> POut {
+    let c: Cur = Cur { src: "", pos: 0 };
+    let r: ARes = ast_add(ast, n);
+    return POut { ast: r.ast, cur: c, node: r.idx };
+}
+
+pub fn n_ident() -> ANode { return node_blank("ident"); }
+pub fn n_true() -> ANode { return node_blank("true"); }
+pub fn n_false() -> ANode { return node_blank("false"); }
+pub fn n_null() -> ANode { return node_blank("null"); }
+
+pub fn n_field(nm: String, t: Int) -> ANode {
+    let mut n: ANode = node_blank("field");
+    n.name = nm;
+    n.a = t;
+    return n;
+}
+
+pub fn n_index(here: Int, t: Int) -> ANode {
+    let mut n: ANode = node_blank("index");
+    n.ival = here;
+    n.a = t;
+    return n;
+}
+
+pub fn n_slice(lo: Int, hi: Int, t: Int) -> ANode {
+    let mut n: ANode = node_blank("slice");
+    n.ival = lo;
+    n.b = hi;
+    n.a = t;
+    return n;
+}
+
+pub fn n_iterate(t: Int) -> ANode {
+    let mut n: ANode = node_blank("iterate");
+    n.a = t;
+    return n;
+}
+
+pub fn n_str(s: String) -> ANode {
+    let mut n: ANode = node_blank("str");
+    n.sval = s;
+    return n;
+}
+
+pub fn n_int(v: Int) -> ANode {
+    let mut n: ANode = node_blank("int");
+    n.ival = v;
+    return n;
+}
+
+// A float literal keeps its written text, the same way a parsed float does, so
+// this build can carry a fractional number without a Float to String conversion.
+pub fn n_float(s: String) -> ANode {
+    let mut n: ANode = node_blank("float");
+    n.sval = s;
+    return n;
+}
+
+pub fn n_bin(op: String, l: Int, r: Int) -> ANode {
+    let mut n: ANode = node_blank("bin");
+    n.name = op;
+    n.a = l;
+    n.b = r;
+    return n;
+}
+
+pub fn n_pair(kind: String, l: Int, r: Int) -> ANode {
+    let mut n: ANode = node_blank(kind);
+    n.a = l;
+    n.b = r;
+    return n;
+}
+
+// A call node never has a child. Its argument, when it has one, is the text in
+// sval, so the child slot stays empty and the run knows this is a leaf.
+pub fn n_func(nm: String) -> ANode {
+    let mut n: ANode = node_blank("func");
+    n.name = nm;
+    return n;
+}
+
+// Convenience wrappers so the parser can build a node and get a POut in one call.
+pub fn put_ident(ast: AList) -> POut { return add_one(ast, n_ident()); }
+pub fn put_true(ast: AList) -> POut { return add_one(ast, n_true()); }
+pub fn put_false(ast: AList) -> POut { return add_one(ast, n_false()); }
+pub fn put_null(ast: AList) -> POut { return add_one(ast, n_null()); }
+pub fn put_field(ast: AList, nm: String, t: Int) -> POut { return add_one(ast, n_field(nm, t)); }
+pub fn put_index(ast: AList, here: Int, t: Int) -> POut { return add_one(ast, n_index(here, t)); }
+pub fn put_slice(ast: AList, lo: Int, hi: Int, t: Int) -> POut { return add_one(ast, n_slice(lo, hi, t)); }
+pub fn put_iterate(ast: AList, t: Int) -> POut { return add_one(ast, n_iterate(t)); }
+pub fn put_str(ast: AList, s: String) -> POut { return add_one(ast, n_str(s)); }
+pub fn put_int(ast: AList, v: Int) -> POut { return add_one(ast, n_int(v)); }
+pub fn put_float(ast: AList, s: String) -> POut { return add_one(ast, n_float(s)); }
+pub fn put_bin(ast: AList, op: String, l: Int, r: Int) -> POut { return add_one(ast, n_bin(op, l, r)); }
+pub fn put_pair(ast: AList, kind: String, l: Int, r: Int) -> POut { return add_one(ast, n_pair(kind, l, r)); }
+

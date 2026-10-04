@@ -1,0 +1,149 @@
+// # Step Results And Node Builders
+//
+// Logline: Declares the result of a filter step and the node builders that mint one.
+//
+// Setup: Pure, no capability needed. A step that mints a value has to hand the grown arena back, so the result carries both the arena and the nodes it selected.
+// Beats:
+//   1. Report a step's nodes together with the arena they belong to.
+//   2. Mint an int, a float, a string, a bool, a null, an array, or an object.
+//   3. Join two node lists, which is how a widening step keeps output order.
+
+import "parse/anchor.oo";
+
+// A selection step returns the grown arena with the nodes it selected. A slice
+// has to build a fresh array, so the arena can no longer be a shared input.
+type SRes = struct {
+    doc: JDoc,
+    out: List[Int]
+};
+
+// jq counts only null and false as falsy: zero, an empty array, and an empty
+// object are all truthy, so 0|not is false. The rule lives here because this is
+// the lowest page that the evaluator, the operators, and the core builtins all
+// already import, and a second copy of it in a builtin would drift.
+pub fn truthy(v: JVal) -> Bool {
+    if v.kind == "null" { return false; }
+    if v.kind == "bool" { return v.bval; }
+    return true;
+}
+
+// jq names a kind the way its error messages do: the two number kinds are one
+// "number", and a boolean is not a "bool". Several builtins report the kind and
+// the value in the same sentence, so the wording lives here rather than being
+// written out again in each of them.
+pub fn kind_word(k: String) -> String {
+    if k == "int" { return "number"; }
+    if k == "float" { return "number"; }
+    if k == "bool" { return "boolean"; }
+    return k;
+}
+
+pub fn one(x: Int) -> List[Int] {
+    let mut l: List[Int] = list_new();
+    return list_push(l, x);
+}
+
+// A widening step joins its outputs rather than replacing them. Order is
+// preserved because output order is part of the contract.
+pub fn concat_indices(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut out: List[Int] = a;
+    let mut i: Int = 0;
+    while i < list_len(b) {
+        out = list_push(out, list_get(b, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+// --- Node builders shared by the value and run pages ---------------------------
+
+// The three sentences jq refuses with, and the only three it uses. They live
+// here rather than in the builtin that first needed them because four pages
+// now refuse this way and a fifth wording is a fifth place to be wrong.
+//
+// A key is named by its value when it is a string and by what it is otherwise:
+// jq writes "Cannot index object with number" for a position and
+// "Cannot index object with string \"a\"" for a name, so printing the digits of
+// a number there would be a wrong answer rather than a different wording.
+pub fn index_named(vkind: String, name: String) -> String {
+    return "Cannot index " + kind_word(vkind) + " with string \"" + name + "\"";
+}
+
+pub fn index_slot(vkind: String) -> String {
+    return "Cannot index " + kind_word(vkind) + " with number";
+}
+
+// An object is never a position, and jq says that in the one sentence it uses
+// wherever an object could have been a slice: indexing an array, a string, or a
+// null. Checked against all three of .[{}], getpath, and setpath.
+pub fn index_refusal(vkind: String, kv: JVal) -> String {
+    if kv.kind == "object" {
+        if vkind == "array" || vkind == "string" || vkind == "null" {
+            return "Array/string slice indices must be integers";
+        }
+    }
+    if kv.kind == "string" { return index_named(vkind, kv.sval); }
+    return "Cannot index " + kind_word(vkind) + " with " + kind_word(kv.kind);
+}
+
+// The value as jq writes it inside a sentence about it: a string in quotes, a
+// number as it was written, a boolean as itself, and a null as null. A float
+// keeps the text it was written with, so 1e2 comes out as 1e2 where jq writes
+// 1E+2. That is the float rendering gap and it is not worth a second mechanism
+// here: a float that fails to iterate is an error either way, and the one that
+// matters is a whole number, which is exact.
+pub fn value_word(v: JVal) -> String {
+    if v.kind == "string" { return "\"" + v.sval + "\""; }
+    if v.kind == "int" { return v.ival.to_string(); }
+    if v.kind == "bool" {
+        if v.bval { return "true"; }
+        return "false";
+    }
+    if v.kind == "null" { return "null"; }
+    return v.sval;
+}
+
+pub fn int_result(doc: JDoc, v: Int) -> SRes {
+    let mut n: JVal = jval_empty("int");
+    n.ival = v;
+    let p: PRes = jdoc_push(doc, n);
+    return SRes { doc: p.doc, out: one(p.idx) };
+}
+
+pub fn str_result(doc: JDoc, s: String) -> SRes {
+    let p: PRes = jdoc_push(doc, jval_string(s));
+    return SRes { doc: p.doc, out: one(p.idx) };
+}
+
+pub fn bool_result(doc: JDoc, v: Bool) -> SRes {
+    let p: PRes = jdoc_push(doc, jval_bool(v));
+    return SRes { doc: p.doc, out: one(p.idx) };
+}
+
+pub fn null_result(doc: JDoc) -> SRes {
+    let p: PRes = jdoc_push(doc, jval_empty("null"));
+    return SRes { doc: p.doc, out: one(p.idx) };
+}
+
+pub fn array_result(doc: JDoc, kids: List[Int]) -> SRes {
+    let p: PRes = jdoc_push(doc, jval_array(kids));
+    return SRes { doc: p.doc, out: one(p.idx) };
+}
+
+pub fn object_result(doc: JDoc, keys: List[String], kids: List[Int]) -> SRes {
+    let p: PRes = jdoc_push(doc, jval_object(keys, kids));
+    return SRes { doc: p.doc, out: one(p.idx) };
+}
+
+pub fn string_array_result(doc: JDoc, texts: List[String]) -> SRes {
+    let mut live: JDoc = doc;
+    let mut kids: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(texts) {
+        let p: PRes = jdoc_push(live, jval_string(list_get(texts, i)));
+        live = p.doc;
+        kids = list_push(kids, p.idx);
+        i = i + 1;
+    }
+    return array_result(live, kids);
+}

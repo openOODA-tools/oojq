@@ -1,0 +1,19 @@
+// # Builtin Subsystem Anchor
+//
+// Logline: Re-exports the jq builtin pages so the evaluator imports one name.
+//
+// Setup: Pure. Each page takes the arena and one node index and returns nodes.
+// Beats:
+//   1. Core builtins: length, keys, type, not, reverse, sort, unique, add, first, last.
+//   2. Argument builtins: has, range, join, startswith, endswith, contains, ltrimstr, test.
+//   3. Conversions and entries: tostring, tonumber, min, max, to_entries, from_entries.
+//   4. Shape and text: the kind filters, values, keys_unsorted, flatten, tojson, explode.
+//   5. Splitting: split and rtrimstr, which are literal where a regex would be unsafe.
+
+import "builtin_core.oo";
+import "builtin_string.oo";
+import "builtin_entries.oo";
+import "builtin_order.oo";
+import "builtin_shape.oo";
+import "builtin_text.oo";
+import "builtin_range.oo";

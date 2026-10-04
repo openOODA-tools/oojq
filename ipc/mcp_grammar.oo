@@ -1,0 +1,66 @@
+// # MCP Grammar Page
+//
+// Logline: Publishes the filter language and builtin set this build actually has.
+//
+// Setup: Pure, no capability needed. Nothing here evaluates anything; it is text that is kept honest by the same dispatch tables the evaluator uses.
+// Beats:
+//   1. List the operators, so a caller does not guess at precedence.
+//   2. List the builtins by the kind of value they answer from.
+//   3. List what is refused, and why, so a caller stops asking.
+
+pub fn mcp_grammar_text() -> String {
+    return "oojq filter language\n"
+        + "\n"
+        + "Paths\n"
+        + "  .            the whole document\n"
+        + "  .name        one member; an absent member is null, as in jq\n"
+        + "  .a.b.c       a chain of members\n"
+        + "  .[]          every child of an array or an object\n"
+        + "  .a[0]        index; a negative index counts back from the end\n"
+        + "  .a[1:3]      slice; either end may be left open\n"
+        + "  [..]         every path, leaf_paths for the leaves\n"
+        + "\n"
+        + "Combining\n"
+        + "  a, b         both results, in order\n"
+        + "  a | b        run b over each result of a\n"
+        + "  a // b       a, or b when a is false or null\n"
+        + "  [a, b]       collect every result into one array\n"
+        + "  empty        select nothing\n"
+        + "  if a then b else c end\n"
+        + "\n"
+        + "Operators\n"
+        + "  + - * / %    on numbers, and + on strings and arrays\n"
+        + "  == != < <= > >=\n"
+        + "  and or not\n"
+        + "\n"
+        + "Builtins on the value in hand\n"
+        + "  length keys keys_unsorted type not reverse add first last sort unique\n"
+        + "  abs fabs floor ceil round sqrt\n"
+        + "  min max tostring tonumber to_entries from_entries tojson fromjson\n"
+        + "  explode implode index rindex flatten split join rtrimstr ltrimstr\n"
+        + "  ascii_downcase ascii_upcase test\n"
+        + "  values nulls booleans numbers strings arrays objects iterables scalars\n"
+        + "\n"
+        + "Builtins that take a filter\n"
+        + "  map select any all group_by sort_by unique_by min_by max_by first last\n"
+        + "\n"
+        + "Formats\n"
+        + "  @json @text @html @uri    every one but @json is tostring first, so a\n"
+        + "                            number and an object are legal input\n"
+        + "\n"
+        + "Refused by name, and why\n"
+        + "  splits sub gsub    the std regex engine that finds a match inside a\n"
+        + "                     string reads one index past the end and crashes,\n"
+        + "                     and it has no character class. test and split are\n"
+        + "                     unaffected and work.\n"
+        + "  as $x, reduce, foreach, def\n"
+        + "                     variable binding needs a named environment\n"
+        + "                     threaded through the evaluator\n"
+        + "  {a: 1}             object construction\n"
+        + "  recurse limit walk with_entries getpath\n"
+        + "                     not built yet\n"
+        + "  ascii             does not exist in jq either\n"
+        + "\n"
+        + "Calling jq_check on a filter is cheaper than calling jq on a large\n"
+        + "document and finding out the filter was wrong.\n";
+}

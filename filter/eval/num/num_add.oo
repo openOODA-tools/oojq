@@ -1,0 +1,168 @@
+// # Adding And Ordering Number Text
+//
+// Logline: Orders, adds, and subtracts the digit runs that num_read.oo keeps for each number.
+//
+// Setup: Pure, no capability needed. Aligning two fractions and folding digits with a carry is school arithmetic done on text, and it stays exact where a Float would round.
+// Beats:
+//   1. Order two numbers exactly, so 1 and 1.0 are the same number.
+//   2. Align fractions to a common width, then add or subtract the joined digits.
+//   3. Put the point back where the scale says it belongs, padding on the left.
+
+import "filter/eval/num_read.oo";
+
+// Two numbers lined up on one decimal point, as the caller will add them.
+type AL = struct {
+    x: String,
+    y: String,
+    w: Int
+};
+
+fn cmp_digit_run(a: String, b: String) -> Int {
+    let n: Int = chars_len(a);
+    let m: Int = chars_len(b);
+    if n < m { return 0 - 1; }
+    if n > m { return 1; }
+    let mut i: Int = 0;
+    while i < n {
+        let da: Int = digit_of(char_at(a, i));
+        let db: Int = digit_of(char_at(b, i));
+        if da < db { return 0 - 1; }
+        if da > db { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn cmp_fraction(a: String, b: String) -> Int {
+    let n: Int = chars_len(a);
+    let m: Int = chars_len(b);
+    let mut k: Int = n;
+    if m > k { k = m; }
+    let mut i: Int = 0;
+    while i < k {
+        let da: Int = digit_at(a, i);
+        let db: Int = digit_at(b, i);
+        if da < db { return 0 - 1; }
+        if da > db { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn cmp_mag(a: Num, b: Num) -> Int {
+    let head: Int = cmp_digit_run(a.ip, b.ip);
+    if head != 0 { return head; }
+    return cmp_fraction(a.fp, b.fp);
+}
+
+// -1, 0, or 1, with the sign of the comparison against the whole number.
+// Two zeros are equal whatever their signs, so the sign guard that reads a
+// negative number as the smaller one has to come after the zero test. Without
+// it -0 < 0 and -0 == 0 was false, both of which jq answers the other way.
+pub fn num_cmp(a: Num, b: Num) -> Int {
+    if num_is_zero(a) && num_is_zero(b) { return 0; }
+    if a.neg != b.neg {
+        if a.neg { return 0 - 1; }
+        return 1;
+    }
+    let m: Int = cmp_mag(a, b);
+    if a.neg { return 0 - m; }
+    return m;
+}
+
+fn align(a: Num, b: Num) -> AL {
+    let n: Int = chars_len(a.fp);
+    let m: Int = chars_len(b.fp);
+    let mut w: Int = n;
+    if m > w { w = m; }
+    let x: String = a.ip + a.fp + zeros(w - n);
+    let y: String = b.ip + b.fp + zeros(w - m);
+    return AL { x: x, y: y, w: w };
+}
+
+fn add_run(x: String, y: String) -> String {
+    let mut i: Int = chars_len(x) - 1;
+    let mut j: Int = chars_len(y) - 1;
+    let mut carry: Int = 0;
+    let mut out: String = "";
+    while i >= 0 || j >= 0 || carry > 0 {
+        let mut d: Int = carry;
+        if i >= 0 { d = d + digit_at(x, i); }
+        if j >= 0 { d = d + digit_at(y, j); }
+        carry = d / 10;
+        out = char_of_digit(d % 10) + out;
+        i = i - 1;
+        j = j - 1;
+    }
+    return out;
+}
+
+// The first run must already be the larger, which the caller has checked.
+fn sub_run(x: String, y: String) -> String {
+    let mut i: Int = chars_len(x) - 1;
+    let mut j: Int = chars_len(y) - 1;
+    let mut borrow: Int = 0;
+    let mut out: String = "";
+    while i >= 0 {
+        let mut d: Int = digit_at(x, i) - borrow;
+        if j >= 0 { d = d - digit_at(y, j); }
+        if d < 0 {
+            d = d + 10;
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        out = char_of_digit(d) + out;
+        i = i - 1;
+        j = j - 1;
+    }
+    return out;
+}
+
+// The point goes back `scale` places from the RIGHT, which is not the same as
+// `scale` places from the left unless the digits happen to be exactly as wide
+// as the scale, and that coincidence is the only reason this ever looked right.
+// 1 + 2.25 has three digits and a scale of two, so the point belongs at one and
+// the answer is 3.25, not 32.5. Padding on the left is what puts a value below
+// one in the right place: "5" at a scale of two is 0.05 and not 50.
+pub fn point_back(digits: String, scale: Int) -> Num {
+    let mut run: String = digits;
+    while scale > 0 && chars_len(run) <= scale { run = "0" + run; }
+    if scale <= 0 { return num_norm(false, run, ""); }
+    let at: Int = chars_len(run) - scale;
+    let n: Int = chars_len(run);
+    return num_norm(false, str_slice(run, 0, at), str_slice(run, at, n));
+}
+
+pub fn num_neg(a: Num) -> Num {
+    if num_is_zero(a) { return a; }
+    return Num { neg: !a.neg, ip: a.ip, fp: a.fp };
+}
+
+// The sign of the answer is the sign of the larger magnitude, and the digits
+// come off the aligned pair whichever way round they were.
+pub fn num_add(a: Num, b: Num) -> Num {
+    let v: AL = align(a, b);
+    if a.neg == b.neg {
+        let sum: String = add_run(v.x, v.y);
+        return num_norm(a.neg, point_back(sum, v.w).ip, point_back(sum, v.w).fp);
+    }
+    let m: Int = cmp_digit_run(v.x, v.y);
+    if m == 0 { return num_norm(false, "0", ""); }
+    if m > 0 {
+        let d: String = sub_run(v.x, v.y);
+        return num_norm(a.neg, point_back(d, v.w).ip, point_back(d, v.w).fp);
+    }
+    let e: String = sub_run(v.y, v.x);
+    return num_norm(b.neg, point_back(e, v.w).ip, point_back(e, v.w).fp);
+}
+
+// The sign is put on by hand rather than through num_neg, which leaves a zero
+// alone. That is right for abs, where jq's abs of a computed -0 is -0, and
+// wrong here: 0 - 0 would be num_add(0, 0) and stay positive, so (0*-1) - 0 came
+// to 0 where jq writes -0. jq's fabs is the other way round and clears it.
+pub fn num_sub(a: Num, b: Num) -> Num {
+    let flipped: Num = Num { neg: !b.neg, ip: b.ip, fp: b.fp };
+    return num_add(a, flipped);
+}
+

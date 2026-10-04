@@ -1,0 +1,203 @@
+# Corpus-blind differential probes for `make sweep`.
+#
+# Nothing here is in the Makefile parity corpus. That is the point: the parity
+# corpus only grows where a divergence was already found, so it confirms and
+# never discovers. These lines are here to be wrong about something new.
+#
+# One filter per line. Blank lines and lines starting with # are skipped.
+# A line is compared byte for byte against jq in all three output modes.
+# Expected values for any regression test taken from a divergence here must be
+# taken from jq by running the identical pipeline, never by hand.
+#
+# Two of these found real bugs on the day they were written:
+#   [(0*-1),(0)]|max          max compared with > so it kept the earlier -0
+#   if .a>1 then .a else 0 end  the branch read the true, not the value
+#
+# The object construction lines at the end were added after that feature landed,
+# and they are here for the class rather than the cases: a key written twice, a
+# generator on either side, an entry that answers nothing, and a key that is an
+# expression. That class could not be written down at all until {a: 1} existed,
+# which is the argument for keeping a corpus that can carry a new shape.
+#
+# The with_entries lines came next, for the same reason: with_entries is a
+# rewrite, so what is worth probing is the shape of its body, not the rewrite.
+# The setpath lines at the end came last, and they are here for the class that
+# only setpath can be wrong about: a path that walks into a value it had to grow,
+# a value that answers nothing, a generator on either side, and the refusals. That
+# class is what the create-an-intermediate crash lived in, and every one of its
+# members was byte identical to jq the day before the crash was found.
+# The scalar refusal lines came after that. This build used to say "cannot index
+# a int with \"b\"" and "cannot iterate over a int", both of which are sentences
+# jq never writes and neither of which a reader could have compared against
+# anything. The class here is every kind a scalar can be, against both an index
+# and an iterate, because the two sentences name the kind differently.
+(.a,.b)|.c?
+[.items[]|tojson|fromjson]|length
+.items[]|select(.id==2)|.k
+.items[]|if .id==1 then .k else 0 end
+[.items[]|if .id>1 then .k else empty end]
+[paths(type=="number")]|length
+(0*-1) < 0
+(0*-1) > 0
+(0*-1) == 0
+(0*-1) == (0*-1)
+(0*-1)|tostring
+[(0*-1)]|add
+[(0*-1),(0)]|max
+[(0),(0*-1)]|max
+[(0*-1),(0)]|min
+[(0),(0*-1)]|min
+[(0*-1),(0)]|sort
+[0,-0]|unique
+[(0*-1),(0)]|max_by(.)
+18446744073709551615|.+0
+[18446744073709551615,1]|add
+[18446744073709551615]|max
+18446744073709551615|keys
+[18446744073709551615,2]|sort_by(.)
+9223372036854775807+1
+100000000000000000000*10
+[.items[]|.id]|add
+.items|length
+.items[1:3]|map(.k)
+[.items[]|keys]|add
+to_entries|map(.key)
+(.items[]|select(.id>1))|length
+[.items[]|.id, .k]|length
+.a // "d"
+[.a,.b]|.c?
+"abc"|test("a")
+"abc"|test("z")
+"abc"|test("abc")
+""|test("")
+"aXbXc"|split("X")|length
+[first(1,2)]
+[last(1,2)]
+[first(.items[])]
+[last(.items[])]
+[.[]|tostring]|join(",")
+"abc"|@base64|@base64d
+[.items[]|tostring]|sort
+add
+[.items[]]|add
+getpath(["meta","ratio"])
+[paths]|length
+[leaf_paths]
+[leaf_paths|length]
+[paths(scalars)]
+del(.meta)
+[.items[]|del(.k)]|length
+to_entries|from_entries
+[.meta]|from_entries
+[1,"a"]|tostring
+[null,1]|tostring
+.items|map(.id)
+.items|map(select(.id>1))|length
+(-3)|fabs
+(-3.5)|fabs
+(0*-1)|fabs
+(0*-1)|abs
+(0*-1)|tostring
+if (false,true) then "t" else "f" end
+if (true,true) then "t" else "f" end
+if (empty) then .a else 0 end
+.utf|length
+.esc|length
+.esc|@json
+.nest|flatten
+.nest|map(length)
+.limits|to_entries|map(.value)|add
+.items|group_by(.k)|map(length)
+.tags|index("edge")
+[.items[]|(.id,.k)]|length
+.items[0]|keys|length
+[recurse]|length
+[.limits[]|select(.>600)]
+.items|reverse|.[0].id
+.txt|split(" ")|map(length)
+.txt|test("Hello")
+.items|map(.id)|@csv
+[.items[]|.k]|join("|")
+.meta|has("stars")
+.items|any(.id==9)
+.items|all(.id>0)
+.nothing//"fallback"
+[.items[]|select(.id>1)|.k]
+.items|sort_by(-.id)|map(.id)
+[.items[]|.id] | add
+.limits|map_values(.)
+limit(2; 1,2,3)
+limit(0; 1,2,3)
+limit(5; 1,2,3)
+[limit(3; .items[])]
+[limit(2; empty)]
+[limit(1; .items[])]
+limit(1; .items[])
+[1,2,3][0:5]
+[1,2,3][1:99]
+[][0:2]
+[1,2,3][2:5]
+[1,2,3][5:9]
+[1,2,3][3:9]
+.nest[0:2]
+{a:1,a:2}
+{a:(1,2), b:(3,4)}
+{a: 1} | keys_unsorted
+{"a"} | type
+[.items[] | {id: .id}] | length
+1,2 | {a: 1}
+{a:empty, b:1}
+{(.a|tostring): .a}
+{a: .a, b: .b, a: .a}
+with_entries(select(.value > 1))
+with_entries({key: .key, value: .value}) | keys_unsorted
+[.items[] | with_entries(select(.id > 1) | {key: .k, value: .id})]
+.limits | with_entries(select(.value > 600) | {key: .key, value: .value})
+setpath(["a"]; 9)
+setpath(["zz"]; 1)
+setpath([]; .)
+setpath([0]; .a)
+setpath(["a","b","c"]; 1)
+setpath([0,1,2]; .name)
+setpath(["a"]; empty)
+setpath(["a"]; .name, .port)
+setpath([.tags[]]; .name)
+setpath(["tags",0]; .name)
+setpath([0]; 1) | tojson
+setpath(["a"]; .) | keys
+[.items[] | setpath(["k"]; .k | ascii_upcase)]
+.limits | setpath(["rps"]; .rps + 1)
+setpath([-1]; "z")
+setpath([1,0]; {})
+.name = "x"
+.missing |= . + 1
+.name |= empty
+.limits.rps += 1
+(.name) |= ascii_upcase
+.name += .port
+[.items[] | .id *= 2] | length
+.limits |= (.rps, .burst)
+.missing.burden = 1
+.name, .port |= .
+[paths] | length
+.limits.rps = .limits.burst
+(.a, .b) = 1
+.name = .port = 1
+.["name"] = 1
+.name[0] = 1
+1|.a
+1|.[0]
+"s"|.a
+"s"|.[0]
+true|.a
+true|.[0]
+null|.a
+null|.[0]
+null|.a.b
+1|.["b"]
+1|[0]
+{}
+null|.[]?
+1|.[]?
+""|.a
+false|.a

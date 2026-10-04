@@ -1,0 +1,52 @@
+// # The Builtins A Rewrite Names
+//
+// Logline: Answers the two calls the parser builds out of a written object and a written setpath, which is where the run hands over.
+//
+// Setup: Pure, no capability needed. Both arrive with their parts already gathered, so neither reaches back into the evaluator for anything.
+// Beats:
+//   1. Build an object out of the entries the parser gathered, one per combination.
+//   2. Set a path, keeping a member's place and appending one that was not there.
+
+import "filter/select_node.oo";
+import "filter/builtin/object/builtin_object.oo";
+import "filter/builtin/path/setpath.oo";
+import "filter/builtin/path/update.oo";
+
+// Whether a name is one the parser invented rather than one a reader typed.
+// Answered on the same list as the calls themselves, because a rewrite that is
+// dispatched but not named is a name with no way to be refused, which is how a
+// bare with_entries used to answer "unknown builtin".
+pub fn is_written(name: String) -> Bool {
+    return name == "__obj" || name == "__sp" || name == "__upd0" || name == "__upd1";
+}
+
+// name is __obj, __sp, __upd0, or __upd1. A written object is answered from the
+// body the parser wrote into the call; a setpath is called the other way round,
+// because it rebuilds the value it was reached from (root) rather than the value
+// in the call (body). The two names are passed apart by the last character, 0
+// for the operator that keeps the first answer and cuts on none, 1 for the one
+// that keeps them all, so a fifth update family is a line here and not a page.
+//
+// The root is read out of the list into a local first as ordinary style, not as
+// a repair: the call-inside-an-argument-list rule was applied here on the theory
+// that it caused the create-an-intermediate crash, and it did not. The cause was
+// a function name shared with another page, which is gated by `make dup-names`.
+//
+// One entry point for every rewrite, so the run spends one line and one import
+// on all of them instead of one of each per rewrite.
+pub fn written_builtin(doc: JDoc, input: List[Int], name: String, body: Int) -> Result[SRes, String] {
+    if name == "__sp" {
+        let root: Int = list_get(input, 0);
+        return builtin_setpath(doc, root, body);
+    }
+    if name == "__upd0" {
+        let root0: Int = list_get(input, 0);
+        return builtin_update(doc, root0, true, body);
+    }
+    if name == "__upd1" {
+        let root1: Int = list_get(input, 0);
+        return builtin_update(doc, root1, false, body);
+    }
+    if name == "__obj" { return builtin_object(doc, body); }
+    return Err("unknown builtin \"" + name + "\"");
+}

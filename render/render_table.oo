@@ -1,0 +1,192 @@
+// # Table And Shell Formats
+//
+// Logline: Answers @csv, @tsv, and @sh, the three formats that turn a value into a row of a text file or into one word of a command line.
+//
+// Setup: Pure, no capability needed. Every field is spelled by the one renderer the CLI prints with, so a number written into a row is the same number that would be printed on its own.
+//
+// Beats:
+//   1. Write one row of CSV or TSV from a flat array, escaped the way each of the two formats asks for.
+//   2. Quote a value for a shell, always, and refuse a container rather than guess at its text.
+//   3. Name a refused value the way jq names one, cut to the same eleven bytes and marked with three dots.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "render/render_value.oo";
+
+fn lead_bytes(ch: String) -> Int {
+    return utf8_width(byte_at(ch, 0) & 255);
+}
+
+// jq writes a refused value out and then cuts it to eleven bytes, saying so
+// with three dots. A string here cannot be cut through the middle of a
+// character, so the cut lands on the last whole character at or below eleven
+// bytes, which is the same text jq writes for every value spelled in ASCII.
+fn cut_text(text: String) -> String {
+    let n: Int = chars_len(text);
+    let mut out: String = "";
+    let mut bytes: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(text, i);
+        let w: Int = lead_bytes(ch);
+        if bytes + w > 11 { return out + "..."; }
+        out = out + ch;
+        bytes = bytes + w;
+        i = i + 1;
+    }
+    return out;
+}
+
+// jq names a value in a message the way that value is written, so a string
+// keeps its quotes. shown_value is the one function that already does it, and
+// the cut is applied to what it returns.
+fn short_value(doc: JDoc, idx: Int) -> String {
+    let v: JVal = jval_at(doc, idx);
+    return kind_word(v.kind) + " (" + cut_text(shown_value(doc, idx)) + ")";
+}
+
+// A TSV field spells a backslash as two, and spells a tab, a newline, and a
+// carriage return as the two characters that name them, because a literal one
+// would end the field or move to another line. A double quote is left alone,
+// which is most of what tells a TSV field from a CSV one.
+fn tsv_text(text: String) -> String {
+    let n: Int = chars_len(text);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(text, i);
+        let b: Int = byte_at(ch, 0) & 255;
+        if ch == "\\" { out = out + "\\\\"; }
+        else if b == 9 { out = out + "\\t"; }
+        else if b == 10 { out = out + "\\n"; }
+        else if b == 13 { out = out + "\\r"; }
+        else { out = out + ch; }
+        i = i + 1;
+    }
+    return out;
+}
+
+// A CSV field is always quoted and a quote inside it is written twice. A comma
+// or a newline between those quotes is then just a character, which is the
+// whole reason the quotes are there.
+fn csv_text(text: String) -> String {
+    let n: Int = chars_len(text);
+    let mut out: String = "\"";
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(text, i);
+        if ch == "\"" { out = out + "\"\""; }
+        else { out = out + ch; }
+        i = i + 1;
+    }
+    return out + "\"";
+}
+
+// A null cell is the empty cell in both formats, which is why [1,null] is 1,
+// and not 1,null: a missing measurement and an empty one are the same column.
+fn field_text(doc: JDoc, at: Int, cell: JVal, mode: String) -> String {
+    if cell.kind == "null" { return ""; }
+    if cell.kind == "string" {
+        if mode == "csv" { return csv_text(cell.sval); }
+        return tsv_text(cell.sval);
+    }
+    return render_as_text(doc, at);
+}
+
+// One row is one flat array, and that is the whole contract. A container inside
+// a row has no cell to go in, so it is refused by name rather than written out
+// as JSON and read back as a single cell that looks like a scalar. A row is not
+// the only one a document can have: `.[] | @csv` over a stream of rows is how
+// a whole table is written, and each row is answered on its own.
+fn row_fields(doc: JDoc, idx: Int, mode: String, named: String) -> Result[String, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" {
+        return Err(short_value(doc, idx) + " cannot be " + named + "-formatted, only array");
+    }
+    let kids: List[Int] = v.kids;
+    let mut out: String = "";
+    let mut sep: String = "";
+    let mut i: Int = 0;
+    while i < list_len(kids) {
+        let at: Int = list_get(kids, i);
+        let cell: JVal = jval_at(doc, at);
+        if cell.kind == "array" || cell.kind == "object" {
+            return Err(short_value(doc, at) + " is not valid in a csv row");
+        }
+        out = out + sep + field_text(doc, at, cell, mode);
+        if mode == "csv" { sep = ","; }
+        else { sep = "\t"; }
+        i = i + 1;
+    }
+    return Ok(out);
+}
+
+pub fn format_csv(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let got: Result[String, String] = row_fields(doc, idx, "csv", "csv");
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(row) => { return Ok(str_result(doc, row)); }
+    }
+}
+
+pub fn format_tsv(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let got: Result[String, String] = row_fields(doc, idx, "tsv", "tsv");
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(row) => { return Ok(str_result(doc, row)); }
+    }
+}
+
+// Closing the quote, opening a new one, and putting an escaped quote between is
+// how a single quote survives inside a single quoted word.
+fn shell_quote(text: String) -> String {
+    let n: Int = chars_len(text);
+    let mut out: String = "'";
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(text, i);
+        if ch == "'" { out = out + "'\\''"; }
+        else { out = out + ch; }
+        i = i + 1;
+    }
+    return out + "'";
+}
+
+// What a word means to a shell is not what it looks like, so a string is quoted
+// whatever it holds. A number and a boolean already are one word, so they are
+// written bare. A container is neither, and there is no single word that means
+// a nested structure, so it is refused rather than spelled out as JSON.
+fn sh_word(doc: JDoc, idx: Int) -> Result[String, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "array" || v.kind == "object" {
+        return Err(short_value(doc, idx) + " can not be escaped for shell");
+    }
+    if v.kind != "string" { return Ok(render_as_text(doc, idx)); }
+    return Ok(shell_quote(v.sval));
+}
+
+pub fn format_sh(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let got: Result[String, String] = sh_line(doc, idx);
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(line) => { return Ok(str_result(doc, line)); }
+    }
+}
+
+fn sh_line(doc: JDoc, idx: Int) -> Result[String, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" { return sh_word(doc, idx); }
+    let kids: List[Int] = v.kids;
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < list_len(kids) {
+        if i > 0 { out = out + " "; }
+        let got: Result[String, String] = sh_word(doc, list_get(kids, i));
+        match got {
+            Err(e) => { return Err(e); }
+            Ok(w) => { out = out + w; }
+        }
+        i = i + 1;
+    }
+    return Ok(out);
+}

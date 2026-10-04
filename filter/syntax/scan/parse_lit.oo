@@ -1,0 +1,250 @@
+// # Lexical Scanning For Filter Text
+//
+// Logline: Reads one token off the front of filter text: a string, a number, a name, or nothing here all.
+//
+// Setup: Pure, no capability needed. A scanner never builds a node; it only reports what it read and where it stopped.
+// Beats:
+//   1. Give the cursor its four moves: skip blanks, test a literal, step forward, report the end.
+//   2. Decode a double quoted string, including the short escapes and a \uXXXX codepoint.
+//   3. Read a number whole and keep its written text, so a float survives without a Float to String conversion.
+
+import "filter/ast.oo";
+import "std/core/primitives/str.oo";
+
+// A scanner hands back the text it read and the position just past it. The
+// source is left out on purpose: it never changes during one parse, and a
+// three word record survives a call between pages where a five word one does
+// not, so a scanned name arrives whole rather than a byte short.
+type Tok = struct {
+    text: String,
+    pos: Int
+};
+
+pub fn is_blank(ch: String) -> Bool {
+    return ch == " " || ch == "\t" || ch == "\n" || ch == "\r";
+}
+
+pub fn cur_skip(c: Cur) -> Cur {
+    let n: Int = chars_len(c.src);
+    let mut i: Int = c.pos;
+    while i < n && is_blank(char_at(c.src, i)) {
+        i = i + 1;
+    }
+    let mut d: Cur = c;
+    d.pos = i;
+    return d;
+}
+
+pub fn cur_end(c: Cur) -> Bool {
+    return c.pos >= chars_len(c.src);
+}
+
+pub fn cur_at(c: Cur) -> String {
+    if cur_end(c) { return ""; }
+    return char_at(c.src, c.pos);
+}
+
+pub fn cur_step(c: Cur, n: Int) -> Cur {
+    let mut d: Cur = c;
+    d.pos = c.pos + n;
+    return d;
+}
+
+pub fn cur_has(c: Cur, lit: String) -> Bool {
+    let n: Int = chars_len(lit);
+    let mut i: Int = 0;
+    while i < n {
+        if c.pos + i >= chars_len(c.src) { return false; }
+        if char_at(c.src, c.pos + i) != char_at(lit, i) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn alphabet() -> String {
+    return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+}
+
+pub fn is_alpha(ch: String) -> Bool {
+    let a: String = alphabet();
+    let n: Int = chars_len(a);
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(a, i) == ch { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn digit_char(ch: String) -> Bool {
+    return ch == "0" || ch == "1" || ch == "2" || ch == "3" || ch == "4"
+        || ch == "5" || ch == "6" || ch == "7" || ch == "8" || ch == "9";
+}
+
+pub fn is_ident_start(ch: String) -> Bool {
+    return is_alpha(ch) || ch == "_" || ch == "@";
+}
+
+pub fn is_ident_char(ch: String) -> Bool {
+    return is_alpha(ch) || digit_char(ch) || ch == "_" || ch == "@";
+}
+
+// A keyword only counts when the next character cannot continue a name, so
+// "android" is one identifier and "and" is the operator.
+pub fn cur_word(c: Cur, w: String) -> Bool {
+    if !cur_has(c, w) { return false; }
+    let after: Int = c.pos + chars_len(w);
+    if after >= chars_len(c.src) { return true; }
+    let ch: String = char_at(c.src, after);
+    return !is_ident_char(ch);
+}
+
+pub fn cur_hex(ch: String) -> Int {
+    if digit_char(ch) {
+        let mut v: Int = 0;
+        let mut i: Int = 0;
+        let mut d: String = "0123456789";
+        while i < 10 {
+            if char_at(d, i) == ch { v = i; }
+            i = i + 1;
+        }
+        return v;
+    }
+    return hex_alpha(ch);
+}
+
+fn hex_alpha(ch: String) -> Int {
+    let mut v: Int = 0;
+    let mut i: Int = 0;
+    let mut s: String = "abcdef";
+    while i < 6 {
+        if char_at(s, i) == ch { v = 10 + i; }
+        i = i + 1;
+    }
+    let mut s2: String = "ABCDEF";
+    let mut j: Int = 0;
+    while j < 6 {
+        if char_at(s2, j) == ch { v = 10 + j; }
+        j = j + 1;
+    }
+    return v;
+}
+
+fn read_hex4(c: Cur) -> Result[Tok, String] {
+    let mut cp: Int = 0;
+    let mut i: Int = 0;
+    while i < 4 {
+        let ch: String = cur_at(cur_step(c, i));
+        if !digit_char(ch) && !is_alpha(ch) { return Err("\\u needs four hex digits"); }
+        cp = cp * 16 + cur_hex(ch);
+        i = i + 1;
+    }
+    let mut t: Tok = Tok { text: chr(cp), pos: c.pos + 4 };
+    if cp >= 55296 && cp <= 56319 {
+        t = read_surrogate(c, cp);
+    }
+    return Ok(t);
+}
+
+// A high surrogate is only meaningful with the low surrogate behind it, and the
+// pair encodes one codepoint above the basic plane.
+fn read_surrogate(c: Cur, hi: Int) -> Tok {
+    let next: Cur = cur_step(c, 4);
+    if cur_has(next, "\\u") {
+        let lo: Int = hex_value_of(cur_step(next, 2));
+        let cp: Int = 65536 + (hi - 55296) * 1024 + (lo - 56320);
+        return Tok { text: chr(cp), pos: next.pos + 4 };
+    }
+    return Tok { text: chr(hi), pos: c.pos + 4 };
+}
+
+fn hex_value_of(c: Cur) -> Int {
+    let mut cp: Int = 0;
+    let mut i: Int = 0;
+    while i < 2 {
+        cp = cp * 16 + cur_hex(cur_at(cur_step(c, i)));
+        i = i + 1;
+    }
+    return cp;
+}
+
+pub fn scan_string(c: Cur) -> Result[Tok, String] {
+    let mut w: Cur = cur_step(c, 1);
+    let mut out: String = "";
+    let mut done: Bool = false;
+    while !done {
+        if cur_end(w) { return Err("unterminated string literal"); }
+        let ch: String = cur_at(w);
+        if ch == "\"" {
+            w = cur_step(w, 1);
+            done = true;
+        } else if ch == "\\" {
+            let esc: String = cur_at(cur_step(w, 1));
+            if esc == "n" { out = out + "\n"; w = cur_step(w, 2); }
+            else if esc == "t" { out = out + "\t"; w = cur_step(w, 2); }
+            else if esc == "r" { out = out + "\r"; w = cur_step(w, 2); }
+            else if esc == "b" { out = out + "\b"; w = cur_step(w, 2); }
+            else if esc == "f" { out = out + "\f"; w = cur_step(w, 2); }
+            else if esc == "\"" { out = out + "\""; w = cur_step(w, 2); }
+            else if esc == "\\" { out = out + "\\"; w = cur_step(w, 2); }
+            else if esc == "/" { out = out + "/"; w = cur_step(w, 2); }
+            else if esc == "u" {
+                let r: Result[Tok, String] = read_hex4(cur_step(w, 2));
+                match r {
+                    Err(e) => { return Err(e); }
+                    Ok(t) => { out = out + t.text; w.pos = t.pos; }
+                }
+            } else { return Err("unknown escape \\" + esc); }
+        } else {
+            out = out + ch;
+            w = cur_step(w, 1);
+        }
+    }
+    return Ok(Tok { text: out, pos: w.pos });
+}
+
+pub fn scan_number_lit(c: Cur) -> Result[Tok, String] {
+    let n: Int = chars_len(c.src);
+    let mut here: Int = c.pos;
+    if here < n && char_at(c.src, here) == "-" { here = here + 1; }
+    let mut digits: Int = 0;
+    while here < n && digit_char(char_at(c.src, here)) { here = here + 1; digits = digits + 1; }
+    if digits == 0 { return Err("expected a number"); }
+    if here < n && char_at(c.src, here) == "." {
+        here = here + 1;
+        let mut frac: Int = 0;
+        while here < n && digit_char(char_at(c.src, here)) { here = here + 1; frac = frac + 1; }
+        if frac == 0 { return Err("a decimal point needs digits after it"); }
+    }
+    if here < n && (char_at(c.src, here) == "e" || char_at(c.src, here) == "E") {
+        here = here + 1;
+        if here < n && (char_at(c.src, here) == "+" || char_at(c.src, here) == "-") { here = here + 1; }
+        let mut ex: Int = 0;
+        while here < n && digit_char(char_at(c.src, here)) { here = here + 1; ex = ex + 1; }
+        if ex == 0 { return Err("an exponent needs digits after it"); }
+    }
+    let text: String = str_slice(c.src, c.pos, here);
+    return Ok(Tok { text: text, pos: here });
+}
+
+// A written form is a float when it carries a decimal point or an exponent,
+// which is the same rule jq uses to decide to print one.
+pub fn is_float_text(s: String) -> Bool {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(s, i);
+        if ch == "." || ch == "e" || ch == "E" { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn scan_ident(c: Cur) -> Result[Tok, String] {
+    if !is_ident_start(cur_at(c)) { return Err("expected a name"); }
+    let n: Int = chars_len(c.src);
+    let mut here: Int = c.pos;
+    while here < n && is_ident_char(char_at(c.src, here)) { here = here + 1; }
+    let text: String = str_slice(c.src, c.pos, here);
+    return Ok(Tok { text: text, pos: here });
+}

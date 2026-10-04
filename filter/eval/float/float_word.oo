@@ -1,0 +1,81 @@
+// # Reading A Double's Word
+//
+// Logline: Takes the 16 hex digits of a binary64 apart and gives back the exact number they stand for, so nothing downstream has to know a word is sixteen characters.
+// Setup: Pure, no capability needed. The significand comes out as an Int because 53 bits fit in 63 and the exact value comes out as a Num because it does not, and the two meet only here.
+// Beats:
+//   1. Split the word into a sign, a binary exponent, and a 53 bit significand.
+//   2. Ask exact_digits for the value those bits stand for, with no rounding.
+//   3. Hand it over as a Num, which is what the arithmetic on the other pages already speaks.
+
+import "filter/eval/num_read.oo";
+import "filter/eval/float/exact_digits.oo";
+
+type Word = struct {
+    neg: Bool,
+    e2: Int,
+    m: Int,
+    tiny: Bool
+};
+
+fn fw_hex(c: String) -> Int {
+    let mut i: Int = 0;
+    while i < 16 {
+        if char_at("0123456789abcdef", i) == c { return i; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn fw_zeros(k: Int) -> String {
+    let mut s: String = "";
+    let mut i: Int = 0;
+    while i < k {
+        s = s + "0";
+        i = i + 1;
+    }
+    return s;
+}
+
+// The first hex digit is the sign and the top three exponent bits, the next
+// two are the rest of the eleven bit exponent, and the last thirteen are the
+// 52 stored significand bits. The implicit leading one is added back here so
+// every other page sees a 53 bit significand and never has to remember it.
+//
+// An exponent field of zero is not one thing. It is a true zero when the
+// significand is zero, and it is every subnormal in the format when it is not,
+// and reading the two as one is a silent zero: 5e-324, the smallest number
+// there is, came back as 0, and 0 + it came back as 0, and 1 * it came back as
+// 0. A subnormal has no implicit leading one, so its significand is the stored
+// 52 bits on their own and its exponent is the one below the smallest normal.
+pub fn word_read(hex: String) -> Word {
+    let c0: Int = fw_hex(char_at(hex, 0));
+    let neg: Bool = c0 >= 8;
+    let mut top: Int = c0;
+    if neg { top = c0 - 8; }
+    let ef: Int = top * 256 + fw_hex(char_at(hex, 1)) * 16 + fw_hex(char_at(hex, 2));
+    let mut mant: Int = 0;
+    let mut i: Int = 3;
+    while i < 16 {
+        mant = mant * 16 + fw_hex(char_at(hex, i));
+        i = i + 1;
+    }
+    if ef == 0 { return Word { neg: neg, e2: 0 - 1022, m: mant, tiny: true }; }
+    return Word { neg: neg, e2: ef - 1023, m: mant + 4503599627370496, tiny: false };
+}
+
+// The exact value, as the digit run the arithmetic pages already carry. This is
+// the whole point of the pair: a double is a dyadic rational, so it can be held
+// exactly, and holding it exactly is what makes an exact sum, an exact
+// product, and an exact comparison available before anything is rounded.
+// A zero keeps its sign, because -0 is a distinct value and jq writes it.
+pub fn word_num(hex: String) -> Num {
+    let w: Word = word_read(hex);
+    if w.tiny && w.m == 0 { return num_norm(w.neg, "0", ""); }
+    let ex: Exact = exact_digits(w.m, w.e2);
+    let d: String = ex.digits;
+    let dp: Int = ex.dp;
+    let n: Int = chars_len(d);
+    if dp <= 0 { return num_norm(w.neg, "0", fw_zeros(0 - dp) + d); }
+    if dp >= n { return num_norm(w.neg, d + fw_zeros(dp - n), ""); }
+    return num_norm(w.neg, str_slice(d, 0, dp), str_slice(d, dp, n));
+}

@@ -1,0 +1,98 @@
+// # Arithmetic On A Double's Word
+//
+// Logline: Adds, subtracts, multiplies, and orders two doubles by doing the arithmetic exactly and rounding once, at the end.
+// Setup: Pure, no capability needed. No wide integer and no rounded intermediate: every step between the two words and the answer is exact, because both operands are dyadic rationals and so is their sum and their product.
+// Beats:
+//   1. Read each word as the exact number it stands for.
+//   2. Use the arithmetic that already exists on digit runs, so this is the only place double arithmetic is written down.
+//   3. Round once through decimal_bits, which is the single rounding IEEE asks for.
+
+import "filter/eval/num_read.oo";
+import "filter/eval/num/num_add.oo";
+import "filter/eval/float/decimal_bits.oo";
+import "filter/eval/float/exact_digits.oo";
+import "filter/eval/float/float_word.oo";
+
+fn zeros_of(k: Int) -> String {
+    let mut s: String = "";
+    let mut i: Int = 0;
+    while i < k {
+        s = s + "0";
+        i = i + 1;
+    }
+    return s;
+}
+
+// -1, 0, or 1, and it is the ordering of the two values as numbers rather than
+// of the two words. Ordering words instead would order by sign, then by
+// exponent, then by significand, which only happens to be the same thing, and
+// "only happens to" is how 0.1 > 0.02 came out false.
+pub fn flt_cmp(a: String, b: String) -> Int {
+    return num_cmp(word_num(a), word_num(b));
+}
+
+// The answer is rounded exactly once, and the rounding is the same one
+// decimal_bits has already been checked on for 5821 cases. Rounding each side
+// first and then adding would be a different number; so would keeping the exact
+// sum, which is 0.1+0.2 = 0.30000000000000004 as a pair of digit runs.
+//
+// A result too small for a normal is not always a refusal. Below half of the
+// smallest subnormal there is only one nearest double and it is zero, so
+// 0.1 * 5e-324 is 4.9e-325 and its exact answer is +0, not an error. The
+// boundary is 2^-1075, which is 5^1075 with the point 1075 places from the
+// right, so it is built the same way every other exact value here is. It is
+// only built when something has already been refused, because that is rare and
+// the run is not cheap.
+//
+// The boundary is INCLUSIVE and that is the whole of a tie. 0.5 * 5e-324 is
+// exactly 2^-1075, exactly halfway between zero and the smallest subnormal, and
+// round to nearest even takes it to zero because zero has an even significand
+// and 5e-324 has an odd one. An exclusive test refuses the one value in the
+// whole range whose answer is most certainly known.
+fn from_exact(digits: String, dp: Int) -> Num {
+    let n: Int = chars_len(digits);
+    if dp <= 0 { return num_norm(false, "0", zeros_of(0 - dp) + digits); }
+    if dp >= n { return num_norm(false, digits + zeros_of(dp - n), ""); }
+    return num_norm(false, str_slice(digits, 0, dp), str_slice(digits, dp, n));
+}
+
+pub fn underflows_to_zero(n: Num) -> Bool {
+    if num_is_zero(n) { return true; }
+    let mag: Num = Num { neg: false, ip: n.ip, fp: n.fp };
+    let lim: Exact = exact_digits(1, 0 - 1023);
+    let half: Num = from_exact(lim.digits, lim.dp);
+    return num_cmp(mag, half) <= 0;
+}
+
+fn rounded(n: Num) -> Result[String, String] {
+    match decimal_bits(num_text(n)) {
+        Ok(hex) => { return Ok(hex); }
+        Err(e) => {
+            if underflows_to_zero(n) {
+                if n.neg { return Ok("8000000000000000"); }
+                return Ok("0000000000000000");
+            }
+            return Err(e);
+        }
+    }
+}
+
+pub fn flt_add(a: String, b: String) -> Result[String, String] {
+    return rounded(num_add(word_num(a), word_num(b)));
+}
+
+pub fn flt_sub(a: String, b: String) -> Result[String, String] {
+    return rounded(num_sub(word_num(a), word_num(b)));
+}
+
+// The product of two digit runs is exact and is a run one more time, and the
+// point comes back the same number of places the two fractions added up to.
+pub fn flt_mul(a: String, b: String) -> Result[String, String] {
+    let x: Num = word_num(a);
+    let y: Num = word_num(b);
+    let fa: Int = chars_len(x.fp);
+    let fb: Int = chars_len(y.fp);
+    let run: String = dd_mul(x.ip + x.fp, y.ip + y.fp);
+    let at: Num = point_back(run, fa + fb);
+    return rounded(num_norm(x.neg != y.neg, at.ip, at.fp));
+}

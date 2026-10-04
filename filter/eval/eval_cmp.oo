@@ -1,0 +1,179 @@
+// # Comparison And Ordering Of Values
+//
+// Logline: Decides whether two values are equal and which of them sorts first.
+//
+// Setup: Pure, no capability needed. jq's order is fixed: null, then false, then true, then numbers, then strings, then arrays, then objects.
+// Beats:
+//   1. Fold an integer and a decimal into one number before comparing them, so 1 equals 1.0.
+//   2. Compare arrays element by element and objects member by member in key order.
+//   3. Return the sign of the order, not a boolean, so the four operators share one walk.
+
+import "filter/eval/num/num_add.oo";
+import "filter/eval/float_op.oo";
+import "filter/eval/eval_leaf.oo";
+import "filter/builtin/anchor.oo";
+
+fn rank_of(v: JVal) -> Int {
+    if v.kind == "null" { return 0; }
+    if v.kind == "bool" {
+        if v.bval { return 2; }
+        return 1;
+    }
+    if is_number_kind(v.kind) { return 3; }
+    if v.kind == "string" { return 4; }
+    if v.kind == "array" { return 5; }
+    return 6;
+}
+
+fn same_pair(doc: JDoc, x: Int, y: Int) -> Bool {
+    let a: JVal = jval_at(doc, x);
+    let b: JVal = jval_at(doc, y);
+    if is_number_kind(a.kind) && is_number_kind(b.kind) {
+        let na: Result[Num, String] = num_of(a);
+        let nb: Result[Num, String] = num_of(b);
+        match na {
+            Err(e) => { return false; }
+            Ok(pa) => {
+                match nb {
+                    Err(e) => { return false; }
+                    Ok(pb) => { return num_cmp(pa, pb) == 0; }
+                }
+            }
+        }
+    }
+    if a.kind != b.kind { return false; }
+    if a.kind == "null" { return true; }
+    if a.kind == "bool" { return a.bval == b.bval; }
+    if a.kind == "string" { return a.sval == b.sval; }
+    if a.kind == "array" { return same_array(doc, a, b); }
+    if a.kind == "object" { return same_object(doc, a, b); }
+    return false;
+}
+
+fn same_array(doc: JDoc, a: JVal, b: JVal) -> Bool {
+    if list_len(a.kids) != list_len(b.kids) { return false; }
+    let mut i: Int = 0;
+    while i < list_len(a.kids) {
+        let x: Int = list_get(a.kids, i);
+        let y: Int = list_get(b.kids, i);
+        if !same_pair(doc, x, y) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Objects are equal when every member of one is present in the other with an
+// equal value, whatever order they were written in, so equal member counts plus
+// one direction of containment settles it.
+fn same_object(doc: JDoc, a: JVal, b: JVal) -> Bool {
+    if list_len(a.keys) != list_len(b.keys) { return false; }
+    return same_members(doc, a, b);
+}
+
+// Objects are equal when every member of one is present in the other with an
+// equal value, whatever order they were written in.
+fn same_members(doc: JDoc, a: JVal, b: JVal) -> Bool {
+    let mut i: Int = 0;
+    while i < list_len(a.keys) {
+        let k: String = list_get(a.keys, i);
+        let x: Int = list_get(a.kids, i);
+        let mut found: Bool = false;
+        let mut j: Int = 0;
+        while j < list_len(b.keys) {
+            if list_get(b.keys, j) == k {
+                let y: Int = list_get(b.kids, j);
+                if same_pair(doc, x, y) { found = true; }
+            }
+            j = j + 1;
+        }
+        if !found { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn values_equal(doc: JDoc, x: Int, y: Int) -> Bool {
+    return same_pair(doc, x, y);
+}
+
+fn compare_same(doc: JDoc, a: JVal, b: JVal) -> Int {
+    if a.kind == "null" { return 0; }
+    if a.kind == "bool" {
+        if a.bval == b.bval { return 0; }
+        if a.bval { return 1; }
+        return 0 - 1;
+    }
+    if a.kind == "string" { return compare_strings(a.sval, b.sval); }
+    if a.kind == "array" { return cmp_array(doc, a, b); }
+    return cmp_object(doc, a, b);
+}
+
+fn cmp_array(doc: JDoc, a: JVal, b: JVal) -> Int {
+    let n: Int = list_len(a.kids);
+    let m: Int = list_len(b.kids);
+    let mut k: Int = n;
+    if m < k { k = m; }
+    let mut i: Int = 0;
+    while i < k {
+        let x: Int = list_get(a.kids, i);
+        let y: Int = list_get(b.kids, i);
+        let c: Int = compare_values(doc, x, y);
+        if c != 0 { return c; }
+        i = i + 1;
+    }
+    if n < m { return 0 - 1; }
+    if n > m { return 1; }
+    return 0;
+}
+
+// Objects sort by their keys in order first, then by the values behind them.
+fn cmp_object(doc: JDoc, a: JVal, b: JVal) -> Int {
+    let ka: List[String] = sort_strings(a.keys);
+    let kb: List[String] = sort_strings(b.keys);
+    let n: Int = list_len(ka);
+    let m: Int = list_len(kb);
+    let mut k: Int = n;
+    if m < k { k = m; }
+    let mut i: Int = 0;
+    while i < k {
+        let x: String = list_get(ka, i);
+        let y: String = list_get(kb, i);
+        let c: Int = compare_strings(x, y);
+        if c != 0 { return c; }
+        i = i + 1;
+    }
+    if n != m { return 0 - 1; }
+    return 0;
+}
+
+pub fn compare_values(doc: JDoc, x: Int, y: Int) -> Int {
+    let a: JVal = jval_at(doc, x);
+    let b: JVal = jval_at(doc, y);
+    let ra: Int = rank_of(a);
+    let rb: Int = rank_of(b);
+    if ra != rb {
+        if ra < rb { return 0 - 1; }
+        return 1;
+    }
+    if a.kind == "float" || b.kind == "float" {
+        let f: Result[Int, String] = float_order(a, b);
+        match f {
+            Err(e) => { return 0; }
+            Ok(c) => { return c; }
+        }
+    }
+    if is_number_kind(a.kind) {
+        let na: Result[Num, String] = num_of(a);
+        let nb: Result[Num, String] = num_of(b);
+        match na {
+            Err(e) => { return 0; }
+            Ok(pa) => {
+                match nb {
+                    Err(e) => { return 0; }
+                    Ok(pb) => { return num_cmp(pa, pb); }
+                }
+            }
+        }
+    }
+    return compare_same(doc, a, b);
+}

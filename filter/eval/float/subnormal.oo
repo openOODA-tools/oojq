@@ -1,0 +1,47 @@
+// # The Stored Bits Of A Subnormal
+//
+// Logline: Reads the 52 significand bits of a value in the subnormal range, where the leading one is stored and is also the LOWEST of them.
+// Setup: Pure, no capability needed. Takes the bit string decimal_bits has already built and the index whose exponent is 2^-1074, and answers the raw integer the word is made of.
+// Beats:
+//   1. Read 52 bits ENDING at the leading one, because index rises as the exponent falls and the field's least significant bit is its top.
+//   2. Round on the bit just BELOW that field, which is the half of an ulp, and on what is left over under it.
+//   3. Ask for nothing else: the sign belongs to the caller, which has one code path for both shapes.
+
+import "filter/eval/num_read.oo";
+
+// j is the index whose exponent is 2^-1074, which is the field's LEAST
+// significant bit. The field runs from exponent 2^-1023 down to 2^-1074, and
+// index RISES as the exponent FALLS, so the field occupies j-51 through j and
+// j-51 is the most significant of the 52.
+//
+// Which is the whole trap, and the normal path's own comment warns about it:
+// a normal double's accumulator runs left to right because its leading one is
+// EXCLUDED, so the first bit it reads is already the next one down. A subnormal
+// STORES its leading one, so it is the last bit of the window and the last bit
+// the accumulator reads. Reading this window in the normal order gives the
+// leading one weight 2^51: 2^-1074 came out as 2^51 ulps, 0x8000000000000,
+// where the answer is 0x0000000000000001, and 2^-1073 came out as zero because
+// its one sits at j-1, outside a window that was a place out.
+pub fn sub_bits(bits: String, tail_left: Bool, j: Int) -> Int {
+    let mut mant: Int = 0;
+    let mut g: Int = 51;
+    while g >= 0 {
+        mant = mant * 2 + digit_at(bits, j - g);
+        g = g - 1;
+    }
+    // The half of an ulp is the bit UNDER the field, not over it. A normal
+    // rounds on the bit past its 52nd because there is a smaller double left to
+    // round TO; a subnormal is already at the bottom of the format, so the only
+    // question is whether the fraction underneath reaches half of the last bit
+    // and carries into the field. The tie that matters is 2^52 - half, which
+    // round-half-even sends to 2^52 and therefore to the smallest normal.
+    let guard: Int = digit_at(bits, j + 1);
+    let mut sticky: Bool = tail_left;
+    let mut t: Int = j + 2;
+    while t < chars_len(bits) {
+        if digit_at(bits, t) == 1 { sticky = true; }
+        t = t + 1;
+    }
+    if guard == 1 && (sticky || mant % 2 == 1) { return mant + 1; }
+    return mant;
+}

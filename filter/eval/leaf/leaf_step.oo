@@ -1,0 +1,155 @@
+// # One Leaf Step
+//
+// Logline: Names the single rule that answers one value in hand, the three arithmetic steps that need a number read as text, and the one of them applied across a stream.
+//
+// Setup: Pure, no capability needed. Every rule here sees values and no filter, so nothing on this page can reach back into the evaluator.
+// Beats:
+//   1. Send a name with no argument to its own page under filter/builtin.
+//   2. Answer abs, floor, ceil, and round through the decimal layer, so they work on a fraction.
+//   3. Refuse a builtin this build has never heard of, and name the regex gap where it stands.
+
+import "filter/select_node.oo";
+import "filter/builtin/anchor.oo";
+import "filter/eval/eval_leaf.oo";
+import "filter/eval/eval_op.oo";
+import "filter/run/eval_sort.oo";
+import "filter/eval/num/num_add.oo";
+import "filter/eval/num/num_round.oo";
+import "filter/run/eval_suggest.oo";
+import "filter/builtin/date/date_builtins.oo";
+import "render/render_format.oo";
+import "render/render_b64.oo";
+import "render/render_value.oo";
+import "render/render_table.oo";
+
+pub fn one_step(doc: JDoc, here: Int, w: String) -> Result[SRes, String] {
+    if w == "length" { return builtin_length(doc, here); }
+    if w == "keys" { return builtin_keys(doc, here); }
+    if w == "type" { return builtin_type(doc, here); }
+    if w == "not" { return builtin_not(doc, here); }
+    if w == "error" { return builtin_error(doc, here); }
+    if w == "toboolean" { return builtin_toboolean(doc, here); }
+    if w == "utf8bytelength" { return builtin_utf8bytelength(doc, here); }
+    if w == "isfinite" || w == "isnan" || w == "isinfinite" {
+        return builtin_number_pred(doc, here, w);
+    }
+    if w == "reverse" { return builtin_reverse(doc, here); }
+    if w == "add" { return array_add(doc, here); }
+    if w == "first" { return builtin_first(doc, here); }
+    if w == "last" { return builtin_last(doc, here); }
+    if w == "tostring" { return builtin_tostring(doc, here); }
+    if w == "tonumber" { return builtin_tonumber(doc, here); }
+    if w == "min" { return min_over(doc, here); }
+    if w == "max" { return max_over(doc, here); }
+    if w == "to_entries" { return builtin_to_entries(doc, here); }
+    if w == "from_entries" { return builtin_from_entries(doc, here); }
+    if w == "values" { return builtin_values(doc, here); }
+    if w == "nulls" { return builtin_nulls(doc, here); }
+    if w == "booleans" { return builtin_booleans(doc, here); }
+    if w == "numbers" { return builtin_numbers(doc, here); }
+    if w == "strings" { return builtin_strings(doc, here); }
+    if w == "arrays" { return builtin_arrays(doc, here); }
+    if w == "objects" { return builtin_objects(doc, here); }
+    if w == "iterables" { return builtin_iterables(doc, here); }
+    if w == "scalars" { return builtin_scalars(doc, here); }
+    if w == "keys_unsorted" { return builtin_keys_unsorted(doc, here); }
+    if w == "tojson" { return builtin_tojson(doc, here); }
+    if w == "fromjson" { return builtin_fromjson(doc, here); }
+    if w == "explode" { return builtin_explode(doc, here); }
+    if w == "implode" { return builtin_implode(doc, here); }
+    if w == "ascii_downcase" { return builtin_downcase(doc, here); }
+    if w == "ascii_upcase" { return builtin_upcase(doc, here); }
+    if w == "@json" { return Ok(format_json(doc, here)); }
+    if w == "@text" { return builtin_tostring(doc, here); }
+    if w == "@html" { return Ok(format_html(doc, here)); }
+    if w == "@uri" { return Ok(format_uri(doc, here)); }
+    if w == "@base64" { return Ok(format_base64(doc, here)); }
+    if w == "@base64d" { return format_base64d(doc, here); }
+    if w == "@csv" { return format_csv(doc, here); }
+    if w == "@tsv" { return format_tsv(doc, here); }
+    if w == "@sh" { return format_sh(doc, here); }
+    if w == "abs" || w == "fabs" { return math_over(doc, here, w); }
+    if w == "floor" { return math_over(doc, here, w); }
+    if w == "ceil" { return math_over(doc, here, w); }
+    if w == "round" { return math_over(doc, here, w); }
+    if w == "empty" { return Ok(SRes { doc: doc, out: list_new() }); }
+    if w == "splits" || w == "sub" || w == "gsub" { return Err(regex_gap(w)); }
+    if w == "sqrt" { return sqrt_over(doc, here); }
+    if w == "gmtime" { return builtin_gmtime(doc, here); }
+    if w == "mktime" { return builtin_mktime(doc, here); }
+    if w == "todate" { return builtin_todate(doc, here); }
+    if w == "fromdate" { return builtin_fromdate(doc, here); }
+    if w == "fromdateiso8601" { return builtin_fromdateiso8601(doc, here); }
+    return Err(unknown_msg(w));
+}
+
+// These three are the only regex builtins left out, and the reason is a defect
+// in the std engine. match_pattern_first, which all three are built on, runs its
+// inner cursor to t_len + 1 and calls str_slice one past the end, so a pattern
+// that does not match reads off the buffer and the process dies on a signal. The
+// NFA also has no character class, so test("[A-Z]") is a wrong answer.
+pub fn regex_gap(w: String) -> String {
+    return "\"" + w + "\" is not supported: the std regex engine that finds a match inside a string is unsafe, and answering it would risk a crash or a wrong result";
+}
+
+// Rounding a decimal is a whole step away from its truncated form, so the
+// decimal layer can answer it without a Float value ever existing. abs and fabs
+// are not one function: jq's abs leaves a computed -0 alone, its fabs clears it.
+fn math_over(doc: JDoc, here: Int, w: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, here);
+    if !is_number_kind(v.kind) {
+        return Err(w + " needs a number, not a " + v.kind);
+    }
+    let got: Result[Num, String] = num_of(v);
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(p) => {
+            if w == "abs" { return Ok(num_node(doc, num_neg(p))); }
+            if w == "fabs" { return Ok(num_node(doc, Num { neg: false, ip: p.ip, fp: p.fp })); }
+            if w == "floor" { return Ok(num_node(doc, num_floor(p))); }
+            if w == "ceil" { return Ok(num_node(doc, num_ceil(p))); }
+            return Ok(num_node(doc, num_round_half_up(p)));
+        }
+    }
+}
+
+// sqrt is the one arithmetic builtin that answers null instead of a number,
+// because jq has no real root of a negative and writes null rather than
+// refusing, and the one that cannot be answered for most values at all.
+fn sqrt_over(doc: JDoc, here: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, here);
+    if !is_number_kind(v.kind) {
+        return Err(kind_word(v.kind) + " (" + shown_value(doc, here) + ") number required");
+    }
+    let got: Result[Num, String] = num_of(v);
+    match got {
+        Err(e) => { return Err(e); }
+        Ok(p) => {
+            if p.neg { return Ok(null_result(doc)); }
+            let root: Result[Num, String] = num_sqrt(p);
+            match root {
+                Err(e) => { return Err(e); }
+                Ok(r) => { return Ok(num_node(doc, r)); }
+            }
+        }
+    }
+}
+
+// A unary minus is one operation over a whole stream, and this was the third
+// copy of the walk that applies one: per_value pairs a filter with its input,
+// walk applies a leaf step across a stream, and this negates one. It lives here
+// because this is the page that can name a step, and eval_run.oo is the one page
+// that cannot grow. Nothing here reads a filter, which is what keeps it legal.
+pub fn neg_over(doc: JDoc, input: List[Int]) -> Result[SRes, String] {
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(input) {
+        match op_neg(live, list_get(input, i)) {
+            Err(e) => { return Err(e); }
+            Ok(v) => { live = v.doc; out = concat_indices(out, v.out); }
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}

@@ -1,0 +1,233 @@
+// # Object Entry Conversion
+//
+// Logline: Converts between a value and an array of key and value pairs.
+//
+// Setup: Pure, no capability needed. Every helper appends to the arena it was handed.
+// Beats:
+//   1. to_entries turns an object into an array of {key, value} objects, keyed by name.
+//   2. to_entries on an array is the same shape keyed by index, as jq writes it.
+//   3. from_entries is the inverse, rebuilding the object in array order.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "std/core/primitives/str.oo";
+
+fn member_index(e: JVal, name: String) -> Int {
+    let mut i: Int = 0;
+    while i < list_len(e.keys) {
+        if list_get(e.keys, i) == name {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn member_text(doc: JDoc, e: JVal, name: String) -> String {
+    let here: Int = member_index(e, name);
+    if here < 0 {
+        return "";
+    }
+    let child: Int = list_get(e.kids, here);
+    let v: JVal = jval_at(doc, child);
+    return v.sval;
+}
+
+fn member_child(e: JVal, name: String) -> Int {
+    let here: Int = member_index(e, name);
+    if here < 0 {
+        return 0 - 1;
+    }
+    return list_get(e.kids, here);
+}
+
+// to_entries on an array keys each pair by its index, which is the whole
+// difference between the two shapes: the pair is built the same way, only the
+// key node changes from text to a number.
+fn entries_by_index(doc: JDoc, v: JVal) -> SRes {
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(v.kids) {
+        let key_node: JVal = jval_int(i);
+        let kp: PRes = jdoc_push(live, key_node);
+        live = kp.doc;
+        let mut keys: List[String] = list_new();
+        keys = list_push(keys, "key");
+        keys = list_push(keys, "value");
+        let mut kids: List[Int] = list_new();
+        kids = list_push(kids, kp.idx);
+        kids = list_push(kids, list_get(v.kids, i));
+        let pair: JVal = jval_object(keys, kids);
+        let pp: PRes = jdoc_push(live, pair);
+        live = pp.doc;
+        out = list_push(out, pp.idx);
+        i = i + 1;
+    }
+    let arr: SRes = array_result(live, out);
+    return arr;
+}
+
+// to_entries emits one {key, value} object per member, in source order. Each
+// call result is bound to a local first, because a call nested directly inside
+// another call's argument list is a shape the emitter rejects.
+pub fn builtin_to_entries(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "array" {
+        let made: SRes = entries_by_index(doc, v);
+        return Ok(made);
+    }
+    if v.kind != "object" {
+        return Err("to_entries needs an array or object, not a " + v.kind);
+    }
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(v.keys) {
+        let key_text: String = list_get(v.keys, i);
+        let key_node: JVal = jval_string(key_text);
+        let kp: PRes = jdoc_push(live, key_node);
+        live = kp.doc;
+        let mut keys: List[String] = list_new();
+        keys = list_push(keys, "key");
+        keys = list_push(keys, "value");
+        let mut kids: List[Int] = list_new();
+        kids = list_push(kids, kp.idx);
+        kids = list_push(kids, list_get(v.kids, i));
+        let pair: JVal = jval_object(keys, kids);
+        let pp: PRes = jdoc_push(live, pair);
+        live = pp.doc;
+        out = list_push(out, pp.idx);
+        i = i + 1;
+    }
+    let arr: SRes = array_result(live, out);
+    return Ok(arr);
+}
+
+// from_entries reads key and value off each element and rebuilds the object.
+pub fn builtin_from_entries(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" {
+        return Err("from_entries needs an array, not a " + v.kind);
+    }
+    let mut keys: List[String] = list_new();
+    let mut kids: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(v.kids) {
+        let e: JVal = jval_at(doc, list_get(v.kids, i));
+        if e.kind != "object" {
+            return Err("from_entries needs an array of objects");
+        }
+        let name: String = member_text(doc, e, "key");
+        keys = list_push(keys, name);
+        kids = list_push(kids, member_child(e, "value"));
+        i = i + 1;
+    }
+    let obj: SRes = object_result(doc, keys, kids);
+    return Ok(obj);
+}
+
+// getpath is the one form of navigation that cannot be written as a chain,
+// because the path arrives as data rather than as filter text. It walks the
+// path, so it needs the value in hand and the path node as two separate things:
+// treating the path as the value is how getpath([]) came to answer [].
+// jq words an indexing failure as "Cannot index <what> with <key>", and it names
+// the two number kinds "number" and the boolean kind "boolean", so the wording
+// is matched rather than invented.
+fn wrong_key(v: JVal, key: JVal) -> String {
+    if key.kind == "string" {
+        return "Cannot index " + kind_word(v.kind) + " with string \"" + key.sval + "\"";
+    }
+    return "Cannot index " + kind_word(v.kind) + " with " + kind_word(key.kind);
+}
+
+// jq truncates a fractional index toward zero, so getpath([0.5]) is the first
+// element and getpath([-0.5]) is the first element again, not an error.
+fn whole_part(text: String) -> Int {
+    let n: Int = chars_len(text);
+    let mut cut: Int = n;
+    let mut i: Int = 0;
+    let mut seen: Bool = false;
+    while i < n && !seen {
+        if char_at(text, i) == "." { cut = i; seen = true; }
+        else { i = i + 1; }
+    }
+    let head: String = str_slice(text, 0, cut);
+    let got: Result[Int, String] = parse_int(head);
+    match got {
+        Err(e) => { return 0; }
+        Ok(v) => { return v; }
+    }
+}
+
+fn getpath_step(doc: JDoc, idx: Int, key: JVal) -> Result[PRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "object" {
+        if key.kind != "string" { return Err(wrong_key(v, key)); }
+        let name: String = key.sval;
+        let child: Int = member_child(v, name);
+        if child >= 0 { return Ok(PRes { doc: doc, idx: child }); }
+        let miss: PRes = jdoc_push(doc, jval_empty("null"));
+        return Ok(miss);
+    }
+    if v.kind == "array" {
+        let mut at: Int = 0;
+        if key.kind == "int" { at = key.ival; }
+        else if key.kind == "float" { at = whole_part(key.sval); }
+        else { return Err(wrong_key(v, key)); }
+        let n: Int = list_len(v.kids);
+        if at < 0 { at = n + at; }
+        if at < 0 || at >= n {
+            let miss2: PRes = jdoc_push(doc, jval_empty("null"));
+            return Ok(miss2);
+        }
+        let kid: Int = list_get(v.kids, at);
+        return Ok(PRes { doc: doc, idx: kid });
+    }
+    if v.kind == "null" { return Ok(PRes { doc: doc, idx: idx }); }
+    return Err(wrong_key(v, key));
+}
+
+// An empty path is the value itself, a missing member and an index past the
+// end are both null, and a negative index counts back from the end exactly as
+// it does in a filter.
+fn getpath_walk(doc: JDoc, idx: Int, path: JVal) -> Result[PRes, String] {
+    let mut live: JDoc = doc;
+    let mut here: Int = idx;
+    let mut i: Int = 0;
+    while i < list_len(path.kids) {
+        let key_node: Int = list_get(path.kids, i);
+        let key: JVal = jval_at(live, key_node);
+        let step: Result[PRes, String] = getpath_step(live, here, key);
+        match step {
+            Err(e) => { return Err(e); }
+            Ok(p) => { live = p.doc; here = p.idx; }
+        }
+        i = i + 1;
+    }
+    return Ok(PRes { doc: live, idx: here });
+}
+
+pub fn builtin_getpath(doc: JDoc, input: List[Int], pidx: Int) -> Result[SRes, String] {
+    let path: JVal = jval_at(doc, pidx);
+    if path.kind != "array" {
+        return Err("getpath needs an array of keys, not a " + path.kind);
+    }
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(input) {
+        let here: Int = list_get(input, i);
+        let step: Result[PRes, String] = getpath_walk(live, here, path);
+        match step {
+            Err(e) => { return Err(e); }
+            Ok(p) => {
+                live = p.doc;
+                let one_hit: List[Int] = one(p.idx);
+                out = concat_indices(out, one_hit);
+            }
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}

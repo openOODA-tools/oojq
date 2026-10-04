@@ -1,0 +1,231 @@
+// # Setting A Path
+//
+// Logline: Walks a path into a value and rebuilds it with the value at the end, which is what every update operator reduces to.
+//
+// Setup: Pure, no capability needed. The path and the new value arrive already read and already gathered, so this page only walks and rebuilds.
+// Beats:
+//   1. Replace a member in place when the name is there, and append one when it is not.
+//   2. Extend an array past its end with nulls, and count a negative index from the end.
+//   3. Refuse to index a number, a string, or a boolean, and refuse a name into an array.
+
+import "filter/select_node.oo";
+import "std/core/primitives/str.oo";
+
+// pair is the body the parser wrote, [[P], [v]]: the answers to the path
+// gathered, then the answers to the value gathered. Either side may answer more
+// than once and the two multiply, so setpath with a generator on either side is
+// as many answers as jq gives. A value that answered nothing leaves none, which
+// is how setpath(["a"]; empty) answers nothing rather than a null.
+pub fn builtin_setpath(doc: JDoc, root: Int, pair: Int) -> Result[SRes, String] {
+    let p: JVal = jval_at(doc, pair);
+    if p.kind != "array" || list_len(p.kids) < 2 { return Err("setpath needs a path and a value"); }
+    let pn: Int = list_get(p.kids, 0);
+    let vn: Int = list_get(p.kids, 1);
+    let paths: JVal = jval_at(doc, pn);
+    let vals: JVal = jval_at(doc, vn);
+    if paths.kind != "array" || vals.kind != "array" { return Err("setpath needs a path and a value"); }
+    if list_len(vals.kids) == 0 { return Ok(SRes { doc: doc, out: list_new() }); }
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(paths.kids) {
+        let path_at: Int = list_get(paths.kids, i);
+        let pv: JVal = jval_at(live, path_at);
+        if pv.kind != "array" { return Err("Path must be specified as an array"); }
+        let mut k: Int = 0;
+        while k < list_len(vals.kids) {
+            let value_at: Int = list_get(vals.kids, k);
+            match set_at(live, root, path_at, value_at) {
+                Err(e) => { return Err(e); }
+                Ok(z) => { live = z.doc; out = concat_indices(out, z.out); }
+            }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+// One path and one value, which is the whole of what a set is. Exported because
+// the update operators are a set with a choice made about how many answers to
+// keep, and they call this rather than carrying a second copy of the walk.
+pub fn set_at(doc: JDoc, root: Int, path_at: Int, val: Int) -> Result[SRes, String] {
+    return set_one(doc, root, path_at, 0, val);
+}
+
+fn set_one(doc: JDoc, node: Int, pnode: Int, at: Int, val: Int) -> Result[SRes, String] {
+    let p: JVal = jval_at(doc, pnode);
+    if at >= list_len(p.kids) { return Ok(SRes { doc: doc, out: one(val) }); }
+    let kn: Int = list_get(p.kids, at);
+    let kv: JVal = jval_at(doc, kn);
+    let cur: JVal = jval_at(doc, node);
+    if cur.kind == "null" { return grow_from_null(doc, pnode, at, val, kv); }
+    if cur.kind == "object" { return put_name(doc, cur, pnode, at, val, kv); }
+    if cur.kind == "array" { return put_slot(doc, cur, pnode, at, val, kv); }
+    return Err(index_refusal(cur.kind, kv));
+}
+
+// A null with a path still to walk becomes whatever the next key names: an
+// object for a name, an array for a number. setpath(["x","y"]; 1) on a value
+// with no x therefore grows {"x":{"y":1}}, and the object is appended so the
+// members already there keep their order.
+//
+// The name is this one and not grow: object/builtin_object.oo already has a
+// grow, and two pages answering to one name is a silent miscompile rather than a
+// build error. Every case that grew an intermediate died while every case that
+// did not answered correctly, which is the shape that argues for the code being
+// right. `make dup-names` is the gate; see AGENTS.md for the whole account.
+fn grow_from_null(doc: JDoc, pnode: Int, at: Int, val: Int, kv: JVal) -> Result[SRes, String] {
+    let seed: SRes = null_result(doc);
+    let nul: Int = list_get(seed.out, 0);
+    let base: JDoc = seed.doc;
+    let inner: Result[SRes, String] = set_one(base, nul, pnode, at + 1, val);
+    match inner {
+        Err(e) => { return Err(e); }
+        Ok(z) => {
+            let kid: Int = list_get(z.out, 0);
+            let mut one_kid: List[Int] = list_new();
+            one_kid = list_push(one_kid, kid);
+            if kv.kind == "string" {
+                let mut one_key: List[String] = list_new();
+                one_key = list_push(one_key, kv.sval);
+                return Ok(object_result(z.doc, one_key, one_kid));
+            }
+            if kv.kind == "int" || kv.kind == "float" {
+                let slot: Int = key_slot(kv);
+                if slot < 0 { return Err("Out of bounds negative array index"); }
+                return Ok(pad_array(z.doc, kid, slot));
+            }
+            return Err(index_refusal("null", kv));
+        }
+    }
+}
+
+// An array that is being created has to be as long as the position names, and
+// every slot before that position is a null. setpath([2];1) is [null,null,1] and
+// setpath([0,1];1) is [[null,1]], so the padding is not a detail of the one
+// element case: without it a two step path silently loses a slot, which is how
+// setpath([0,1];1) on null came to answer [[1]] where jq answers [[null,1]].
+//
+// The negative case is refused by the caller, because a Result built inside the
+// Ok arm of a match on a Result is a shape the backend rejects (ERR llvm Ok
+// kind) behind a clean build and a clean check.
+fn pad_array(doc: JDoc, kid: Int, slot: Int) -> SRes {
+    let mut live: JDoc = doc;
+    let mut kids: List[Int] = list_new();
+    while list_len(kids) < slot {
+        let pad: SRes = null_result(live);
+        let pid: Int = list_get(pad.out, 0);
+        live = pad.doc;
+        kids = list_push(kids, pid);
+    }
+    kids = list_push(kids, kid);
+    return array_result(live, kids);
+}
+
+// A position is a whole number even when it was written with a fraction, because
+// jq reads 1.5 as 1 and -0.5 as 0. A float node in this build carries no integer
+// field, only the text it was written with, so the digits in front of the dot are
+// read back out of that text. Answering with the whole number instead would be a
+// wrong answer, not a rounding: [9]|setpath([1.5];1) is [9,1] and not [1].
+fn key_slot(kv: JVal) -> Int {
+    if kv.kind == "int" { return kv.ival; }
+    let text: String = kv.sval;
+    let n: Int = chars_len(text);
+    let mut cut: Int = n;
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(text, i) == "." { cut = i; }
+        i = i + 1;
+    }
+    if cut == 0 { return 0; }
+    let head: String = str_slice(text, 0, cut);
+    let got: Result[Int, String] = parse_int(head);
+    match got {
+        Err(e) => { return 0; }
+        Ok(v) => { return v; }
+    }
+}
+
+// A name already in the object is replaced where it stands, so setpath keeps a
+// member's position, and a name not there is appended. Rebuilding rather than
+// writing in place is what the append-only arena allows, and jval_object is what
+// then keeps a name written twice at its first position.
+fn put_name(doc: JDoc, cur: JVal, pnode: Int, at: Int, val: Int, kv: JVal) -> Result[SRes, String] {
+    if kv.kind != "string" { return Err(index_refusal("object", kv)); }
+    let nm: String = kv.sval;
+    let mut j: Int = 0;
+    while j < list_len(cur.keys) {
+        if list_get(cur.keys, j) == nm {
+            let old: Int = list_get(cur.kids, j);
+            let inner: Result[SRes, String] = set_one(doc, old, pnode, at + 1, val);
+            match inner {
+                Err(e) => { return Err(e); }
+                Ok(z) => {
+                    let fresh: Int = list_get(z.out, 0);
+                    let kids: List[Int] = replace_at(cur.kids, j, fresh);
+                    return Ok(object_result(z.doc, cur.keys, kids));
+                }
+            }
+        }
+        j = j + 1;
+    }
+    let seed: SRes = null_result(doc);
+    let nul: Int = list_get(seed.out, 0);
+    let base: JDoc = seed.doc;
+    let inner: Result[SRes, String] = set_one(base, nul, pnode, at + 1, val);
+    match inner {
+        Err(e) => { return Err(e); }
+        Ok(z) => {
+            let fresh: Int = list_get(z.out, 0);
+            let kids: List[Int] = list_push(cur.kids, fresh);
+            let keys: List[String] = list_push(cur.keys, nm);
+            return Ok(object_result(z.doc, keys, kids));
+        }
+    }
+}
+
+// A number indexes an array. Inside it the slot is replaced, past it the array
+// grows with nulls until the slot is there, and a negative index counts back
+// from the end, which is how setpath([-1]; 9) puts 9 last.
+fn put_slot(doc: JDoc, cur: JVal, pnode: Int, at: Int, val: Int, kv: JVal) -> Result[SRes, String] {
+    if kv.kind != "int" && kv.kind != "float" { return Err(index_refusal("array", kv)); }
+    let mut slot: Int = key_slot(kv);
+    if slot < 0 { slot = list_len(cur.kids) + slot; }
+    if slot < 0 { return Err("Out of bounds negative array index"); }
+    let mut live: JDoc = doc;
+    let mut kids: List[Int] = cur.kids;
+    while list_len(kids) <= slot {
+        let made: SRes = null_result(live);
+        let mid: Int = list_get(made.out, 0);
+        live = made.doc;
+        kids = list_push(kids, mid);
+    }
+    let target: Int = list_get(kids, slot);
+    let inner: Result[SRes, String] = set_one(live, target, pnode, at + 1, val);
+    match inner {
+        Err(e) => { return Err(e); }
+        Ok(z) => {
+            let fresh: Int = list_get(z.out, 0);
+            let arr: List[Int] = replace_at(kids, slot, fresh);
+            return Ok(array_result(z.doc, arr));
+        }
+    }
+}
+
+// The list is rebuilt rather than written into, because the arena hands out
+// copies and a list held in a node cannot be changed after the fact.
+fn replace_at(l: List[Int], at: Int, v: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(l) {
+        if i == at {
+            out = list_push(out, v);
+        } else {
+            let held: Int = list_get(l, i);
+            out = list_push(out, held);
+        }
+        i = i + 1;
+    }
+    return out;
+}

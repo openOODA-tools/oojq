@@ -1,0 +1,107 @@
+// # Unicode Escapes In JSON Source
+//
+// Logline: Rewrites \uXXXX escapes in the source into the UTF-8 bytes they stand for, so the reader never has to know they were there.
+//
+// Setup: Pure, no capability needed. The std reader refuses a \u escape outright, and it is the only thing in the pipeline that still understands one, so this pass runs before the buffer is built.
+// Beats:
+//   1. Track whether the source is inside a string, because a backslash means nothing anywhere else.
+//   2. Leave an escaped backslash alone, so \\u0041 stays the six characters it is written as.
+//   3. Join a surrogate pair into the one code point it stands for, and stand a lone surrogate in as U+FFFD.
+
+import "parse/utf8.oo";
+
+// The code point a reader substitutes for a value it cannot represent. It is
+// spelled where it is used rather than named, because this language has no
+// constant declaration.
+fn hex_value(b: Int) -> Int {
+    if b >= 48 && b <= 57 { return b - 48; }
+    if b >= 97 && b <= 102 { return b - 87; }
+    if b >= 65 && b <= 70 { return b - 55; }
+    return 0 - 1;
+}
+
+// Four hex digits, or a refusal. Anything else is left for the reader to
+// complain about, so a malformed document is still judged in one place.
+fn read_four_hex(src: String, at: Int) -> Int {
+    if at + 4 > chars_len(src) { return 0 - 1; }
+    let mut v: Int = 0;
+    let mut k: Int = 0;
+    while k < 4 {
+        let ch: String = char_at(src, at + k);
+        let d: Int = hex_value(byte_at(ch, 0) & 255);
+        if d < 0 { return 0 - 1; }
+        v = v * 16 + d;
+        k = k + 1;
+    }
+    return v;
+}
+
+// A high surrogate is only half a code point. The low half is the next escape,
+// and the two together are 1024 apart from the base, which is the rule the
+// standard states.
+fn read_low(src: String, at: Int, high: Int) -> Result[Int, String] {
+    if at + 6 > chars_len(src) { return Err("a high surrogate has no low one after it"); }
+    let s1: Int = byte_at(char_at(src, at), 0) & 255;
+    let s2: Int = byte_at(char_at(src, at + 1), 0) & 255;
+    if s1 != 92 || s2 != 117 { return Err("a high surrogate has no low one after it"); }
+    let lo: Int = read_four_hex(src, at + 2);
+    if lo < 56320 || lo > 57343 { return Err("a high surrogate has no low one after it"); }
+    return Ok(65536 + (high - 55296) * 1024 + (lo - 56320));
+}
+
+// The buffer is returned rather than a string, because reading the bytes back
+// out of one loses every byte after the first multi byte character. The reader
+// wants bytes, so it is handed bytes.
+pub fn unescape_unicode(src: String) -> List[Int] {
+    let n: Int = chars_len(src);
+    let mut buf: List[Int] = bytes_new();
+    let mut in_string: Bool = false;
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(src, i);
+        let b: Int = byte_at(ch, 0) & 255;
+        if b == 34 {
+            in_string = !in_string;
+            buf = bytes_push(buf, b);
+            i = i + 1;
+        } else if !in_string {
+            buf = push_utf8_char(buf, ch);
+            i = i + 1;
+        } else if b != 92 {
+            buf = push_utf8_char(buf, ch);
+            i = i + 1;
+        } else if i + 1 >= n {
+            buf = bytes_push(buf, 92);
+            i = i + 1;
+        } else {
+            let nx: Int = byte_at(char_at(src, i + 1), 0) & 255;
+            if nx != 117 {
+                buf = bytes_push(buf, 92);
+                buf = bytes_push(buf, nx);
+                i = i + 2;
+            } else {
+                let hex_at: Int = i + 2;
+                let cp: Int = read_four_hex(src, hex_at);
+                if cp < 0 {
+                    buf = bytes_push(buf, 92);
+                    buf = bytes_push(buf, 117);
+                    i = hex_at + 1;
+                } else {
+                    let mut code: Int = cp;
+                    let mut next: Int = hex_at + 4;
+                    if cp >= 55296 && cp <= 56319 {
+                        let joined: Result[Int, String] = read_low(src, hex_at + 4, cp);
+                        match joined {
+                            Err(e) => { code = 65533; }
+                            Ok(pair) => { code = pair; next = hex_at + 10; }
+                        }
+                    }
+                    if code >= 56320 && code <= 57343 { code = 65533; }
+                    buf = push_utf8(buf, code);
+                    i = next;
+                }
+            }
+        }
+    }
+    return buf;
+}

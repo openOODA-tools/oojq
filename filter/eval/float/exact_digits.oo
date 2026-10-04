@@ -1,0 +1,133 @@
+// # The Exact Digits Of A Double
+//
+// Logline: Writes the exact decimal value of a binary64 as digit text, which every double has because it is a dyadic rational.
+// Setup: Pure, no capability needed. Every double is m times a power of two, so its decimal value is exact and finite, and this page is where that gets said out loud in digits. Int is 63 bits and the widest of those values is 767 digits across, so the arithmetic is done in digit runs and nothing here is approximated.
+// Beats:
+//   1. Multiply a digit run by a small number, and by another run, carrying by hand.
+//   2. Fold the power of two out of the significand: shift for an integer, times a power of five for a fraction.
+//   3. Hand back the digits and where the point goes, with no rounding at all.
+
+import "filter/eval/num_read.oo";
+
+type Exact = struct {
+    digits: String,
+    dp: Int
+};
+
+fn dd_digit(d: Int) -> String {
+    return char_at("0123456789", d);
+}
+
+fn dd_pad(k: Int) -> String {
+    let mut s: String = "";
+    let mut i: Int = 0;
+    while i < k {
+        s = s + "0";
+        i = i + 1;
+    }
+    return s;
+}
+
+// Multiplying by a small number is the one big-integer step that is linear: the
+// carry runs left to right, exactly as a schoolboy does it, and a leading carry
+// is the only place a new digit appears.
+fn dd_mul_small(s: String, k: Int) -> String {
+    if k == 0 { return "0"; }
+    let n: Int = chars_len(s);
+    let mut carry: Int = 0;
+    let mut out: String = "";
+    let mut i: Int = n - 1;
+    while i >= 0 {
+        let cur: Int = digit_at(s, i) * k + carry;
+        carry = cur / 10;
+        out = dd_digit(cur - carry * 10) + out;
+        i = i - 1;
+    }
+    if carry > 0 { return (carry).to_string() + out; }
+    return out;
+}
+
+fn dd_add(a: String, b: String) -> String {
+    let la: Int = chars_len(a);
+    let lb: Int = chars_len(b);
+    let mut i: Int = la - 1;
+    let mut j: Int = lb - 1;
+    let mut carry: Int = 0;
+    let mut out: String = "";
+    while i >= 0 || j >= 0 || carry > 0 {
+        let mut cur: Int = carry;
+        if i >= 0 { cur = cur + digit_at(a, i); }
+        if j >= 0 { cur = cur + digit_at(b, j); }
+        carry = cur / 10;
+        out = dd_digit(cur - carry * 10) + out;
+        i = i - 1;
+        j = j - 1;
+    }
+    return dd_trim_lead(out);
+}
+
+fn dd_trim_lead(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    while i < n - 1 && char_at(s, i) == "0" { i = i + 1; }
+    return str_slice(s, i, n);
+}
+
+// One digit of one multiplier at a time, each part landing at its own place
+// value. This is schoolbook multiplication with the digits kept as text, and it
+// is linear in the product because one side is always the 16 digit significand.
+pub fn dd_mul(a: String, b: String) -> String {
+    let lb: Int = chars_len(b);
+    let mut acc: String = "0";
+    let mut i: Int = lb - 1;
+    let mut place: Int = 0;
+    while i >= 0 {
+        let d: Int = digit_at(b, i);
+        if d != 0 {
+            let part: String = dd_mul_small(a, d) + dd_pad(place);
+            acc = dd_add(acc, part);
+        }
+        i = i - 1;
+        place = place + 1;
+    }
+    return acc;
+}
+
+fn dd_trailing_zeros(s: String) -> Int {
+    let mut n: Int = chars_len(s);
+    while n > 1 && char_at(s, n - 1) == "0" { n = n - 1; }
+    return chars_len(s) - n;
+}
+
+// m is the 53 bit significand and e2 the binary exponent, so the value is
+// m times 2^e2 and dp is how many of its digits sit before the point. Trailing
+// zeros are pulled off the digits and handed to the exponent instead, which is
+// what makes 2^52 come out as the one digit 1 rather than as 1 and 52 zeros.
+pub fn exact_digits(m: Int, e2: Int) -> Exact {
+    let k: Int = e2 - 52;
+    let mut s: String = "";
+    let mut p: Int = 0;
+    if k >= 0 {
+        s = (m).to_string();
+        let mut i: Int = 0;
+        while i < k {
+            s = dd_mul_small(s, 2);
+            i = i + 1;
+        }
+    } else {
+        let mut five: String = "1";
+        let mut i: Int = 0;
+        while i < 0 - k {
+            five = dd_mul_small(five, 5);
+            i = i + 1;
+        }
+        s = dd_mul((m).to_string(), five);
+        p = k;
+    }
+    let z: Int = dd_trailing_zeros(s);
+    if z > 0 {
+        s = str_slice(s, 0, chars_len(s) - z);
+        p = p + z;
+    }
+    return Exact { digits: s, dp: chars_len(s) + p };
+}

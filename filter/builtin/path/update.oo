@@ -1,0 +1,90 @@
+// # The Update Operators
+//
+// Logline: Applies |=, +=, -=, *=, /= and %= to a path, which is a set with one choice made about how many answers to keep.
+//
+// Setup: Pure, no capability needed. The path and the answers to the update arrive already gathered, so this page decides and delegates rather than walking.
+// Beats:
+//   1. Set every answer the update gave, which is what the arithmetic operators do.
+//   2. Set only the first, and cut the key when the update answered nothing, which is what |= does.
+//   3. Take the walk from setpath rather than keeping a second copy of it.
+
+import "filter/select_node.oo";
+import "filter/run/eval_path.oo";
+import "filter/builtin/path/setpath.oo";
+
+// jq's three update families do not agree about how many answers they keep, and
+// the difference is not derivable from the spelling, so all three were measured
+// against jq 1.8.1 before any of them was written:
+//
+//   .a = v         is setpath(P; v) exactly, empty value and all
+//   .a |= f       keeps the FIRST answer of getpath(P)|f, and when f answers
+//                 nothing it CUTS the key: .a |= empty on {"a":1,"b":2} is {"b":2}
+//   .a += v       keeps EVERY answer, and answers nothing when v answers nothing:
+//                 .a += empty is nothing, where .a |= empty is {"b":2}
+//
+// first_only is the whole of that difference. It is passed rather than encoded in
+// the name so the two names stay one name, and a builtin whose behaviour is a
+// boolean argument is a builtin whose behaviour is in the call site.
+pub fn builtin_update(doc: JDoc, root: Int, first_only: Bool, pair: Int) -> Result[SRes, String] {
+    let p: JVal = jval_at(doc, pair);
+    if p.kind != "array" || list_len(p.kids) < 2 { return Err("an update needs a path and a value"); }
+    let paths: JVal = jval_at(doc, list_get(p.kids, 0));
+    let vals: JVal = jval_at(doc, list_get(p.kids, 1));
+    if paths.kind != "array" { return Err("Path must be specified as an array"); }
+    if vals.kind != "array" { return Err("an update needs a path and a value"); }
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(paths.kids) {
+        let path_at: Int = list_get(paths.kids, i);
+        if first_only && list_len(vals.kids) == 0 {
+            // The one branch that is not a set. A body that answered nothing is
+            // not a null to write; jq reads it as a removal, and a path that
+            // named nothing was never there, which del_at already answers as a
+            // no-op. That is why .zz |= empty on {"a":1} leaves {"a":1}.
+            let steps: List[String] = encoded_steps(live, path_at);
+            let cut: SRes = del_at(live, root, steps);
+            live = cut.doc;
+            out = concat_indices(out, cut.out);
+        } else {
+            let mut k: Int = 0;
+            while k < list_len(vals.kids) {
+                let value_at: Int = list_get(vals.kids, k);
+                let got: Result[SRes, String] = set_at(live, root, path_at, value_at);
+                match got {
+                    Err(e) => { return Err(e); }
+                    Ok(z) => { live = z.doc; out = concat_indices(out, z.out); }
+                }
+                // Keep the first and only the first: the counter jumps past the
+                // end rather than to one, because one is still inside it when
+                // the update gave two answers. That showed as a List quota
+                // overrun on `.a |= (1,2)` rather than as a wrong answer, which
+                // is the shape a loop that does not terminate takes.
+                if first_only { k = list_len(vals.kids); } else { k = k + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+// del_at reads its steps as text with a letter in front, "s:" for a name and
+// "i:" for a position, because that is the form parse_path.oo writes and
+// parse_path.oo is the only thing that knows how a step is stored. The path the
+// update arrived with is a real jq path instead, so the one form is turned into
+// the other here rather than the other way round at three call sites.
+fn encoded_steps(doc: JDoc, path_at: Int) -> List[String] {
+    let p: JVal = jval_at(doc, path_at);
+    let mut out: List[String] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(p.kids) {
+        let step: JVal = jval_at(doc, list_get(p.kids, i));
+        if step.kind == "string" {
+            out = list_push(out, "s:" + step.sval);
+        } else {
+            out = list_push(out, "i:" + step.ival.to_string());
+        }
+        i = i + 1;
+    }
+    return out;
+}

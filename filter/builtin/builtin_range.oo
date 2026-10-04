@@ -1,0 +1,98 @@
+// # Range Builtin
+//
+// Logline: Counts from one bound to another, streaming each whole number it passes on the way.
+//
+// Setup: Pure, no capability needed. The bounds are whole numbers written in the filter, so nothing is read from the document.
+// Beats:
+//   1. One number counts up from zero, two count from the first, three add a step.
+//   2. The arguments are taken as text, because no filter expression contains a semicolon.
+//   3. The values stream rather than collect, so [range(n)] is what makes an array.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "filter/syntax/scan/parse_span.oo";
+
+// A semicolon divides the bounds. It is named apart from any other splitter of
+// the same job, because two pages answering to one name is how a call ends up
+// reaching the wrong body.
+fn range_parts(text: String) -> List[String] {
+    let n: Int = chars_len(text);
+    let mut out: List[String] = list_new();
+    let mut cur: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(text, i) == ";" {
+            out = list_push(out, trim_ws(cur));
+            cur = "";
+        } else {
+            cur = cur + char_at(text, i);
+        }
+        i = i + 1;
+    }
+    out = list_push(out, trim_ws(cur));
+    return out;
+}
+
+fn bound(text: String) -> Result[Int, String] {
+    let got: Result[Int, String] = parse_int(text);
+    match got {
+        Err(e) => { return Err("range needs whole numbers"); }
+        Ok(v) => { return Ok(v); }
+    }
+}
+
+fn do_range(doc: JDoc, text: String) -> Result[SRes, String] {
+    let parts: List[String] = range_parts(text);
+    let n: Int = list_len(parts);
+    if n == 0 || n > 3 {
+        return Err("range takes one to three whole numbers");
+    }
+    let mut from: Int = 0;
+    if n > 1 {
+        let a: Result[Int, String] = bound(list_get(parts, 0));
+        match a {
+            Err(e) => { return Err(e); }
+            Ok(v) => { from = v; }
+        }
+    }
+    let mut stop_at: Int = n - 1;
+    if n == 3 { stop_at = 1; }
+    let mut upto: Int = 0;
+    let b: Result[Int, String] = bound(list_get(parts, stop_at));
+    match b {
+        Err(e) => { return Err(e); }
+        Ok(v) => { upto = v; }
+    }
+    let mut by: Int = 1;
+    if n == 3 {
+        let c: Result[Int, String] = bound(list_get(parts, 2));
+        match c {
+            Err(e) => { return Err(e); }
+            Ok(v) => { by = v; }
+        }
+    }
+    if by == 0 {
+        return Err("range needs a step that is not zero");
+    }
+    let mut out: List[Int] = list_new();
+    let mut live: JDoc = doc;
+    let mut here: Int = from;
+    let mut go: Bool = true;
+    while go {
+        if by > 0 && here >= upto { go = false; }
+        else if by < 0 && here <= upto { go = false; }
+        else {
+            let r: SRes = int_result(live, here);
+            live = r.doc;
+            out = concat_indices(out, r.out);
+            here = here + by;
+        }
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+// range is a zero arity filter: it ignores the value in hand and streams from
+// the bounds it was given.
+pub fn range_over(doc: JDoc, text: String) -> Result[SRes, String] {
+    return do_range(doc, text);
+}

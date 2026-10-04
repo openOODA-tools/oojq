@@ -1,0 +1,24 @@
+// # Render Subsystem Anchor - Value Stream To JSON Text
+//
+// Logline: Serialises emitted values as JSON text for stdout or a socket frame.
+//
+// Setup: Writes its own escaper because json_writer.oo escapes only quote, backslash, and three whitespace bytes.
+// Beats:
+//   1. Encode scalars, arrays, and objects with correct string escaping.
+//   2. Keep output byte-exact so double runs produce identical bytes.
+
+// Spacing follows jq's default form: a space after each colon and comma, and a
+// space just inside a non-empty bracket pair. An empty container stays {} or
+// [] so a round trip through oojq does not invent structure.
+//
+// Any byte below 0x20 that is not one of the seven short escapes is written as
+// a \u00XX sequence, and any byte at or above 0x7f is written as a full \uXXXX
+// escape. That keeps the output valid UTF-8 text even when the input carried a
+// byte the reader could not decode, and it is why render_string.oo does not
+// simply reuse the std escaper.
+
+import "render_value.oo";
+
+pub fn render_anchor_status() -> String {
+    return "render: compact JSON, one value per line, full control-byte escaping";
+}

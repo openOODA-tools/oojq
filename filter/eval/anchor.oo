@@ -1,0 +1,23 @@
+// # Value Semantics Anchor
+//
+// Logline: Re-exports the pages that decide what one value means, as opposed to how a filter reaches it.
+//
+// Setup: Pure, no capability needed. Nothing here parses a filter or walks a node tree, so this page can be imported from either side of the evaluator.
+// Beats:
+//   1. Read a number as text, and add, subtract, compare, and round it there.
+//   2. Walk a member, an index, a slice, and an iteration over one value.
+//   3. Apply one arithmetic, comparison, or built-in operator to values in hand.
+
+import "eval_builtin.oo";
+import "eval_cmp.oo";
+import "eval_div.oo";
+import "eval_leaf.oo";
+import "num/num_add.oo";
+import "num/num_round.oo";
+import "eval_op.oo";
+import "leaf/leaf_step.oo";
+import "num_read.oo";
+
+pub fn eval_anchor_status() -> String {
+    return "eval: values, numbers as text, and single value operators";
+}

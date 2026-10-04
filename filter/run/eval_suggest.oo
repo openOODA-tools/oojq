@@ -1,0 +1,183 @@
+// # Nearest Builtin Name
+//
+// Logline: Finds the builtin a misspelled name was probably meant to be, so a refusal can point at the fix.
+//
+// Setup: Pure, no capability needed. It reads a list of names and measures strings; it never evaluates a filter.
+// Beats:
+//   1. A refusal names the closest builtin instead of only saying the name is unknown.
+//   2. The list is what this build really dispatches, so a suggestion is never a name that would fail too.
+//   3. Nothing is suggested when no name is close, because a wild guess is worse than none.
+
+
+// Every name the evaluator dispatches. A test walks this list and fails if any
+// of them is answered as unknown, so it cannot drift away from the dispatch.
+pub fn known_names() -> List[String] {
+    let mut n: List[String] = list_new();
+    n = list_push(n, "abs");
+    n = list_push(n, "fabs");
+    n = list_push(n, "add");
+    n = list_push(n, "all");
+    n = list_push(n, "any");
+    n = list_push(n, "arrays");
+    n = list_push(n, "ascii_downcase");
+    n = list_push(n, "ascii_upcase");
+    n = list_push(n, "booleans");
+    n = list_push(n, "ceil");
+    n = list_push(n, "del");
+    n = list_push(n, "contains");
+    n = list_push(n, "empty");
+    n = list_push(n, "endswith");
+    n = list_push(n, "explode");
+    n = list_push(n, "error");
+    n = list_push(n, "isfinite");
+    n = list_push(n, "isnan");
+    n = list_push(n, "isinfinite");
+    n = list_push(n, "toboolean");
+    n = list_push(n, "utf8bytelength");
+    n = list_push(n, "first");
+    n = list_push(n, "flatten");
+    n = list_push(n, "floor");
+    n = list_push(n, "from_entries");
+    n = list_push(n, "fromdate");
+    n = list_push(n, "fromdateiso8601");
+    n = list_push(n, "fromjson");
+    n = list_push(n, "getpath");
+    n = list_push(n, "gmtime");
+    n = list_push(n, "group_by");
+    n = list_push(n, "has");
+    n = list_push(n, "implode");
+    n = list_push(n, "index");
+    n = list_push(n, "iterables");
+    n = list_push(n, "join");
+    n = list_push(n, "keys");
+    n = list_push(n, "keys_unsorted");
+    n = list_push(n, "last");
+    n = list_push(n, "leaf_paths");
+    n = list_push(n, "length");
+    n = list_push(n, "ltrimstr");
+    n = list_push(n, "map");
+    n = list_push(n, "max");
+    n = list_push(n, "max_by");
+    n = list_push(n, "min");
+    n = list_push(n, "min_by");
+    n = list_push(n, "mktime");
+    n = list_push(n, "not");
+    n = list_push(n, "nulls");
+    n = list_push(n, "numbers");
+    n = list_push(n, "objects");
+    n = list_push(n, "path");
+    n = list_push(n, "paths");
+    n = list_push(n, "range");
+    n = list_push(n, "reverse");
+    n = list_push(n, "rindex");
+    n = list_push(n, "round");
+    n = list_push(n, "rtrimstr");
+    n = list_push(n, "scalars");
+    n = list_push(n, "select");
+    n = list_push(n, "sort");
+    n = list_push(n, "sort_by");
+    n = list_push(n, "split");
+    n = list_push(n, "startswith");
+    n = list_push(n, "splits");
+    n = list_push(n, "sqrt");
+    n = list_push(n, "sub");
+    n = list_push(n, "gsub");
+    n = list_push(n, "strings");
+    n = list_push(n, "to_entries");
+    n = list_push(n, "todate");
+    n = list_push(n, "test");
+    n = list_push(n, "tojson");
+    n = list_push(n, "tonumber");
+    n = list_push(n, "tostring");
+    n = list_push(n, "type");
+    n = list_push(n, "unique");
+    n = list_push(n, "unique_by");
+    n = list_push(n, "values");
+    n = list_push(n, "@html");
+    n = list_push(n, "@base64");
+    n = list_push(n, "@base64d");
+    n = list_push(n, "@csv");
+    n = list_push(n, "@tsv");
+    n = list_push(n, "@sh");
+    n = list_push(n, "@json");
+    n = list_push(n, "@text");
+    n = list_push(n, "@uri");
+    return n;
+}
+
+// Levenshtein distance, two rows rather than a matrix. A name is short, so the
+// quadratic cost is not worth optimising away.
+pub fn edit_distance(a: String, b: String) -> Int {
+    let n: Int = chars_len(a);
+    let m: Int = chars_len(b);
+    if n == 0 { return m; }
+    if m == 0 { return n; }
+    let mut prev: List[Int] = list_new();
+    let mut j: Int = 0;
+    while j <= m {
+        prev = list_push(prev, j);
+        j = j + 1;
+    }
+    let mut i: Int = 1;
+    while i <= n {
+        let mut cur: List[Int] = list_new();
+        cur = list_push(cur, i);
+        let mut k: Int = 1;
+        while k <= m {
+            let ca: String = char_at(a, i - 1);
+            let mut cost: Int = 1;
+            if ca == char_at(b, k - 1) { cost = 0; }
+            let mut best: Int = list_get(prev, k) + 1;
+            let left: Int = list_get(cur, k - 1) + 1;
+            if left < best { best = left; }
+            let diag: Int = list_get(prev, k - 1) + cost;
+            if diag < best { best = diag; }
+            cur = list_push(cur, best);
+            k = k + 1;
+        }
+        prev = cur;
+        i = i + 1;
+    }
+    let last: Int = list_get(prev, m);
+    return last;
+}
+
+// One edit is a near miss at any length. Two is allowed only once the name is
+// long enough that a single slip is unlikely, and never for a short name where
+// two edits reach something entirely different.
+pub fn suggest_name(w: String) -> String {
+    let names: List[String] = known_names();
+    let mut limit: Int = 1;
+    if chars_len(w) > 4 { limit = 2; }
+    let mut best: String = "";
+    let mut best_d: Int = limit + 1;
+    let mut i: Int = 0;
+    while i < list_len(names) {
+        let cand: String = list_get(names, i);
+        let d: Int = edit_distance(w, cand);
+        if d < best_d { best_d = d; best = cand; }
+        i = i + 1;
+    }
+    return best;
+}
+
+// Whether a name is one this build dispatches at all. A builtin that is
+// recognised and then refused still counts, because pointing at it and
+// explaining why is more use than saying the name is unknown.
+pub fn is_known(w: String) -> Bool {
+    let names: List[String] = known_names();
+    let mut i: Int = 0;
+    while i < list_len(names) {
+        if list_get(names, i) == w { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn unknown_msg(w: String) -> String {
+    let hint: String = suggest_name(w);
+    if chars_len(hint) > 0 {
+        return "unknown builtin \"" + w + "\"; did you mean \"" + hint + "\"?";
+    }
+    return "unknown builtin \"" + w + "\"";
+}

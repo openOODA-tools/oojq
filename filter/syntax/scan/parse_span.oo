@@ -1,0 +1,248 @@
+// # Spans And Brackets In Filter Text
+//
+// Logline: Finds where a bracketed group, a quoted run, or a conditional ends without parsing what is inside it.
+//
+// Setup: Pure, no capability needed. This page is the reason the grammar can be split into a straight line of pages rather than one knot.
+// Beats:
+//   1. Track bracket depth and string quotes so a bracket inside a string moves nothing.
+//   2. Find the first keyword outside every bracket and every nested conditional.
+//   3. Hand back a group's interior as text, ready to be parsed when it is reached.
+
+import "syntax/scan/parse_lit.oo";
+import "std/core/primitives/str.oo";
+import "filter/ast.oo";
+
+// A doubled slash is an operator, but three would be an empty one, so the
+// scanner only offers the pair.
+pub fn open_bound() -> Int {
+    return 0 - 32768;
+}
+
+pub fn trim_ws(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut lo: Int = 0;
+    while lo < n && is_blank(char_at(s, lo)) { lo = lo + 1; }
+    let mut hi: Int = n - 1;
+    while hi >= lo && is_blank(char_at(s, hi)) { hi = hi - 1; }
+    if hi < lo { return ""; }
+    return str_slice(s, lo, hi + 1);
+}
+
+// The first colon that sits outside every bracket and every string, or -1.
+// A colon inside a quoted key such as .["a:b"] is part of the key, not a slice.
+pub fn find_top_colon(c: Cur) -> Int {
+    let n: Int = chars_len(c.src);
+    let mut depth: Int = 0;
+    let mut i: Int = c.pos;
+    while i < n {
+        let ch: String = char_at(c.src, i);
+        if ch == "\"" {
+            i = skip_quoted(c, i);
+        } else if ch == "(" || ch == "[" || ch == "{" {
+            depth = depth + 1;
+            i = i + 1;
+        } else if ch == ")" || ch == "]" || ch == "}" {
+            depth = depth - 1;
+            i = i + 1;
+        } else if ch == ":" && depth == 0 {
+            return i;
+        } else {
+            i = i + 1;
+        }
+    }
+    return 0 - 1;
+}
+
+pub fn word_at(c: Cur, i: Int, w: String) -> Bool {
+    let mut probe: Cur = c;
+    probe.pos = i;
+    return cur_word(probe, w);
+}
+
+// Index just past the closing quote of the string starting here i, so a bracket
+// written inside a string does not move the bracket depth.
+pub fn skip_quoted(c: Cur, i: Int) -> Int {
+    let n: Int = chars_len(c.src);
+    let mut j: Int = i + 1;
+    while j < n {
+        let ch: String = char_at(c.src, j);
+        if ch == "\\" {
+            j = j + 2;
+        } else if ch == "\"" {
+            return j + 1;
+        } else {
+            j = j + 1;
+        }
+    }
+    return n;
+}
+
+// The index of the bracket that closes the one under the cursor, or -1.
+pub fn find_close(c: Cur) -> Int {
+    let n: Int = chars_len(c.src);
+    let mut depth: Int = 0;
+    let mut i: Int = c.pos;
+    while i < n {
+        let ch: String = char_at(c.src, i);
+        if ch == "\"" {
+            i = skip_quoted(c, i);
+        } else if ch == "(" || ch == "[" || ch == "{" {
+            depth = depth + 1;
+            i = i + 1;
+        } else if ch == ")" || ch == "]" || ch == "}" {
+            depth = depth - 1;
+            if depth == 0 { return i; }
+            i = i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return 0 - 1;
+}
+
+// A balanced group and its interior, so the parser never has to recurse into
+// the form it is only trying to find the end of.
+pub fn scan_group(c: Cur) -> Result[Tok, String] {
+    let opener: String = cur_at(c);
+    let close: Int = find_close(c);
+    if close < 0 {
+        return Err("unclosed " + opener + " in filter");
+    }
+    let inner: String = str_slice(c.src, c.pos + 1, close);
+    return Ok(Tok { text: inner, pos: close + 1 });
+}
+
+// The first of three keywords that sits outside every bracket and every nested
+// conditional, or -1. A nested if raises the count so its then and end are
+// passed over rather than mistaken for this conditional's own.
+pub fn find_kw(c: Cur, w: String) -> Int {
+    let n: Int = chars_len(c.src);
+    let mut depth: Int = 0;
+    let mut nest: Int = 0;
+    let mut i: Int = c.pos;
+    while i < n {
+        let ch: String = char_at(c.src, i);
+        if ch == "\"" {
+            i = skip_quoted(c, i);
+        } else if ch == "(" || ch == "[" || ch == "{" {
+            depth = depth + 1;
+            i = i + 1;
+        } else if ch == ")" || ch == "]" || ch == "}" {
+            depth = depth - 1;
+            i = i + 1;
+        } else if depth == 0 && nest == 0 && word_at(c, i, w) {
+            return i;
+        } else if depth == 0 && word_at(c, i, "if") {
+            nest = nest + 1;
+            i = i + 1;
+        } else if depth == 0 && word_at(c, i, "end") {
+            nest = nest - 1;
+            i = i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return 0 - 1;
+}
+
+pub fn find_any_kw(c: Cur, w1: String, w2: String, w3: String) -> Int {
+    let mut best: Int = 0 - 1;
+    let mut a: Int = find_kw(c, w1);
+    if a >= 0 { best = a; }
+    let mut b: Int = find_kw(c, w2);
+    if b >= 0 && (best < 0 || b < best) { best = b; }
+    let mut d: Int = find_kw(c, w3);
+    if d >= 0 && (best < 0 || d < best) { best = d; }
+    return best;
+}
+
+// A conditional keeps its branches as text. An elif becomes a nested if, which
+// is the same filter written the other way round, so the evaluator only ever
+// has to understand if and else.
+fn parse_if_body(c: Cur, ast: AList) -> Result[POut, String] {
+    let tpos: Int = find_kw(c, "then");
+    if tpos < 0 {
+        return Err("if without then");
+    }
+    let cond: String = trim_ws(str_slice(c.src, c.pos, tpos));
+    if chars_len(cond) == 0 {
+        return Err("if without a condition");
+    }
+    let mut ac: Cur = cur_skip(cur_step(c, tpos - c.pos + 4));
+    let epos: Int = find_any_kw(ac, "elif", "else", "end");
+    if epos < 0 {
+        return Err("if without end");
+    }
+    let th: String = trim_ws(str_slice(ac.src, ac.pos, epos));
+    let endp: Int = find_kw(ac, "end");
+    if endp < 0 {
+        return Err("if without end");
+    }
+    let mut n: ANode = node_blank("ifthen");
+    n.sval = cond;
+    n.t1 = th;
+    n.name = "if";
+    if word_at(ac, epos, "elif") {
+        let rest: String = trim_ws(str_slice(ac.src, epos + 4, endp));
+        n.t2 = "if " + rest;
+        n.name = "ifelse";
+    } else if word_at(ac, epos, "else") {
+        let rest: String = trim_ws(str_slice(ac.src, epos + 4, endp));
+        n.t2 = rest;
+        n.name = "ifelse";
+    }
+    let add: ARes = ast_add(ast, n);
+    let after: Cur = cur_step(ac, endp - ac.pos + 3);
+    return Ok(POut { ast: add.ast, cur: after, node: add.idx });
+}
+
+
+// Every top level piece of a body, leaving a comma that is inside a bracket, a
+// string, or an object alone. Object construction needs it and nothing else does.
+pub fn split_top_commas(text: String) -> List[String] {
+    let c: Cur = Cur { src: text, pos: 0 };
+    let n: Int = chars_len(text);
+    let mut out: List[String] = list_new();
+    let mut cur: String = "";
+    let mut depth: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(text, i);
+        if ch == "\"" {
+            let e: Int = skip_quoted(c, i);
+            cur = cur + str_slice(text, i, e);
+            i = e;
+        } else if ch == "(" || ch == "[" || ch == "{" {
+            depth = depth + 1;
+            cur = cur + ch;
+            i = i + 1;
+        } else if ch == ")" || ch == "]" || ch == "}" {
+            depth = depth - 1;
+            cur = cur + ch;
+            i = i + 1;
+        } else if ch == "," && depth == 0 {
+            out = list_push(out, cur);
+            cur = "";
+            i = i + 1;
+        } else {
+            cur = cur + ch;
+            i = i + 1;
+        }
+    }
+    if chars_len(trim_ws(cur)) > 0 { out = list_push(out, cur); }
+    return out;
+}
+
+// A slice bound written as nothing here all stays open, which no real index
+// collides with.
+pub fn slice_bound(text: String) -> Result[Int, String] {
+    let s: String = trim_ws(text);
+    if chars_len(s) == 0 {
+        return Ok(open_bound());
+    }
+    let r: Result[Int, String] = parse_int(s);
+    match r {
+        Err(e) => { return Err("a slice bound must be a whole number, not \"" + s + "\""); }
+        Ok(v) => { return Ok(v); }
+    }
+}

@@ -1,0 +1,224 @@
+// # UTC Date Builtins
+//
+// Logline: Answers gmtime, mktime, todate, and fromdate by turning whole seconds into a calendar date and back, with no clock and no timezone anywhere.
+//
+// Setup: Pure, no capability needed. The date arithmetic is civil_days.oo; this page only reads a value out of the arena, hands it over, and writes the answer back as nodes.
+// Beats:
+//   1. gmtime and mktime, the two halves of the broken-down array [y, mon, d, h, mi, s, wday, yday] jq passes between them.
+//   2. todate and fromdate, the same pair as ISO text, which is how a date crosses a program boundary.
+//   3. Refuse a value of the wrong kind by name rather than reading it as a zero.
+
+import "parse/value_tree.oo";
+import "filter/select_node.oo";
+import "filter/eval/eval_leaf.oo";
+import "filter/builtin/date/civil_days.oo";
+import "std/core/primitives/str.oo";
+
+// A whole number of seconds. A float is truncated, which is what todate does
+// anyway (1500000000.7 is 2017-07-14T02:40:00Z in jq) and what keeps one rule
+// for every builtin here.
+fn db_epoch(v: JVal, why: String) -> Result[Int, String] {
+    if !is_number_kind(v.kind) { return Err(why); }
+    let n: Result[Num, String] = num_of(v);
+    match n {
+        Err(e) => { return Err(e); }
+        Ok(m) => {
+            let k: Int = parse_int_digits(m.ip);
+            if m.neg { return Ok(0 - k); }
+            return Ok(k);
+        }
+    }
+}
+
+fn db_two(n: Int) -> String {
+    if n < 10 { return "0" + (n).to_string(); }
+    return (n).to_string();
+}
+
+fn db_year(y: Int) -> String {
+    if y < 0 { return "-" + (0 - y).to_string(); }
+    let s: String = (y).to_string();
+    if chars_len(s) >= 4 { return s; }
+    return "000" + db_two(y);
+}
+
+fn db_push_int(doc: JDoc, acc: List[Int], k: Int) -> SRes {
+    let made: SRes = int_result(doc, k);
+    return SRes { doc: made.doc, out: list_push(made.out, list_get(made.out, 0)) };
+}
+
+// The broken-down form, which is an array and not a string, so mktime can read
+// it back and gmtime|gmtime is a round trip. jq numbers the month from zero
+// (6 is July) and the weekday from Sunday, and both are copied exactly.
+fn db_parts(t: Int) -> Civ {
+    let sp: Split = split_day(t);
+    let civ: Civ = days_civil(sp.days);
+    return civ;
+}
+
+pub fn builtin_gmtime(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    let t: Result[Int, String] = db_epoch(v, "gmtime() requires numeric inputs");
+    match t {
+        Err(e) => { return Err(e); }
+        Ok(sec) => {
+            let sp: Split = split_day(sec);
+            let civ: Civ = db_parts(sec);
+            let mut live: JDoc = doc;
+            let mut kids: List[Int] = list_new();
+            let mut i: Int = 0;
+            let mut fields: List[Int] = list_new();
+            fields = list_push(fields, civ.y);
+            fields = list_push(fields, civ.m - 1);
+            fields = list_push(fields, civ.d);
+            fields = list_push(fields, sp.sod / 3600);
+            fields = list_push(fields, (sp.sod % 3600) / 60);
+            fields = list_push(fields, sp.sod % 60);
+            fields = list_push(fields, day_weekday(sp.days));
+            fields = list_push(fields, day_yday(civ.y, sp.days));
+            while i < list_len(fields) {
+                let made: SRes = int_result(live, list_get(fields, i));
+                live = made.doc;
+                kids = list_push(kids, list_get(made.out, 0));
+                i = i + 1;
+            }
+            let made: SRes = array_result(live, kids);
+            return Ok(made);
+        }
+    }
+}
+
+pub fn builtin_mktime(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" { return Err("mktime requires parsed datetime inputs"); }
+    // Six slots, and a slot that is not there is a zero rather than a refusal:
+    // [1]|mktime is 0001-01-01T00:00:00Z in jq and []|mktime is all zeros. A slot
+    // that IS there and is not a number is the refusal, which is the difference
+    // between a short array and a wrong one. Anything past the sixth is ignored,
+    // which is why the wday and yday gmtime writes at the end are never read.
+    let mut got: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 6 {
+        if i >= list_len(v.kids) { got = list_push(got, 0); i = i + 1; continue; }
+        let kid: Int = list_get(v.kids, i);
+        let e: JVal = jval_at(doc, kid);
+        if !is_number_kind(e.kind) { return Err("mktime requires parsed datetime inputs"); }
+        let n: Result[Int, String] = db_epoch(e, "mktime requires parsed datetime inputs");
+        match n {
+            Err(why) => { return Err(why); }
+            Ok(k) => { got = list_push(got, k); }
+        }
+        i = i + 1;
+    }
+    let y: Int = list_get(got, 0);
+    let mon0: Int = list_get(got, 1);
+    let d: Int = list_get(got, 2);
+    let h: Int = list_get(got, 3);
+    let mi: Int = list_get(got, 4);
+    let s: Int = list_get(got, 5);
+    let days: Int = civil_days(y, mon0 + 1, d);
+    let total: Int = days * 86400 + h * 3600 + mi * 60 + s;
+    return Ok(int_result(doc, total));
+}
+
+pub fn builtin_todate(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    let t: Result[Int, String] = db_epoch(v, "strftime/1 requires parsed datetime inputs");
+    match t {
+        Err(e) => { return Err(e); }
+        Ok(sec) => {
+            let sp: Split = split_day(sec);
+            let civ: Civ = db_parts(sec);
+            let h: Int = sp.sod / 3600;
+            let mi: Int = (sp.sod % 3600) / 60;
+            let s: Int = sp.sod % 60;
+            let text: String = db_year(civ.y) + "-" + db_two(civ.m) + "-" + db_two(civ.d)
+                + "T" + db_two(h) + ":" + db_two(mi) + ":" + db_two(s) + "Z";
+            return Ok(str_result(doc, text));
+        }
+    }
+}
+
+// A field read out of the ISO text, and where the next one starts. A month, a
+// day, an hour, a minute, and a second are each one or two digits in jq, so
+// every field after the year is read as "up to two digits" and the delimiter
+// after it says where the field ended. That is what lets 2021-3-4T05:06:07Z
+// parse and is why the fields cannot be read at fixed offsets.
+type Field = struct {
+    num: Int,
+    p: Int
+};
+
+fn db_read12(s: String, at: Int) -> Field {
+    let n: Int = chars_len(s);
+    if at >= n || !digit_char(char_at(s, at)) { return Field { num: 0 - 1, p: at }; }
+    let mut v: Int = digit_of(char_at(s, at));
+    let mut p: Int = at + 1;
+    if p < n && digit_char(char_at(s, p)) {
+        v = v * 10 + digit_of(char_at(s, p));
+        p = p + 1;
+    }
+    return Field { num: v, p: p };
+}
+
+fn db_all_digits(s: String, from: Int, to: Int) -> Bool {
+    if to <= from { return false; }
+    let mut i: Int = from;
+    while i < to {
+        if !digit_char(char_at(s, i)) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn db_at(s: String, p: Int, c: String) -> Bool {
+    if p >= chars_len(s) { return false; }
+    return char_at(s, p) == c;
+}
+
+fn db_parse_iso(s: String) -> Result[Int, String] {
+    // No length guard up front: the fields after the year are one or two digits
+    // each, so the shortest text jq accepts is 0000-1-1T0:0:0Z at fourteen
+    // characters and the longest here is unbounded. Every field read below
+    // checks its own bounds, so a short string fails where it runs out rather
+    // than at a fixed length that a single-digit month would fall under.
+    if !db_all_digits(s, 0, 4) { return Err("not the ISO spelling"); }
+    let y: Int = parse_int_digits(str_slice(s, 0, 4));
+    if !db_at(s, 4, "-") { return Err("not the ISO spelling"); }
+    let fm: Field = db_read12(s, 5);
+    if fm.num < 0 || !db_at(s, fm.p, "-") { return Err("not the ISO spelling"); }
+    let fd: Field = db_read12(s, fm.p + 1);
+    if fd.num < 0 || !db_at(s, fd.p, "T") { return Err("not the ISO spelling"); }
+    let fh: Field = db_read12(s, fd.p + 1);
+    if fh.num < 0 || !db_at(s, fh.p, ":") { return Err("not the ISO spelling"); }
+    let fi: Field = db_read12(s, fh.p + 1);
+    if fi.num < 0 || !db_at(s, fi.p, ":") { return Err("not the ISO spelling"); }
+    let fs: Field = db_read12(s, fi.p + 1);
+    if fs.num < 0 || !db_at(s, fs.p, "Z") { return Err("not the ISO spelling"); }
+    if fs.p + 1 != chars_len(s) { return Err("not the ISO spelling"); }
+    if fm.num < 1 || fm.num > 12 { return Err("not the ISO spelling"); }
+    let days: Int = civil_days(y, fm.num, fd.num);
+    return Ok(days * 86400 + fh.num * 3600 + fi.num * 60 + fs.num);
+}
+
+fn db_from_iso(doc: JDoc, idx: Int, name: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "string" { return Err("strptime/1 requires string inputs and arguments"); }
+    let s: String = v.sval;
+    let parsed: Result[Int, String] = db_parse_iso(s);
+    match parsed {
+        Err(e) => {
+            let drop: String = e;
+            return Err("date \"" + s + "\" does not match format \"%Y-%m-%dT%H:%M:%SZ\"");
+        }
+        Ok(t) => { return Ok(int_result(doc, t)); }
+    }
+}
+
+pub fn builtin_fromdate(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return db_from_iso(doc, idx, "fromdate");
+}
+
+pub fn builtin_fromdateiso8601(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return db_from_iso(doc, idx, "fromdateiso8601");
+}

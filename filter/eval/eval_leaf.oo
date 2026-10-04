@@ -1,0 +1,203 @@
+// # Leaf Evaluation
+//
+// Logline: Evaluates the terms of a filter that reach a value without needing another filter run through them.
+//
+// Setup: Pure, no capability needed. A leaf takes one node index and answers with node indices, minting a new node only when the answer is a fresh value such as null.
+// Beats:
+//   1. Walk a member name, an index, a slice, and an iteration.
+//   2. Recurse through a value and everything beneath it in document order.
+//   3. Report a missing member as null and a non container as a refusal, as jq does.
+
+import "filter/ast.oo";
+import "filter/select_node.oo";
+import "filter/syntax/scan/parse_span.oo";
+import "filter/eval/num_read.oo";
+import "parse/decode_number.oo";
+import "std/core/primitives/str.oo";
+
+// A constant is minted once per value it is applied to, because a filter is
+// run once per value and two runs of the same constant are two values.
+pub fn leaf_lit(doc: JDoc, n: ANode) -> SRes {
+    if n.kind == "str" { return str_result(doc, n.sval); }
+    if n.kind == "int" { return int_result(doc, n.ival); }
+    if n.kind == "float" {
+        let p: PRes = jdoc_push(doc, jval_float(n.sval));
+        return SRes { doc: p.doc, out: one(p.idx) };
+    }
+    if n.kind == "true" { return bool_result(doc, true); }
+    if n.kind == "false" { return bool_result(doc, false); }
+    return null_result(doc);
+}
+
+// A member that is not there is null, not an error: a missing key is the most
+// ordinary thing a filter can ask for. A repeated key takes its last value.
+pub fn leaf_field(doc: JDoc, idx: Int, name: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "null" { return Ok(null_result(doc)); }
+    if v.kind != "object" {
+        return Err(index_named(v.kind, name));
+    }
+    let mut here: Int = 0 - 1;
+    let mut i: Int = 0;
+    while i < list_len(v.keys) {
+        if list_get(v.keys, i) == name { here = i; }
+        i = i + 1;
+    }
+    if here < 0 { return Ok(null_result(doc)); }
+    let kid: Int = list_get(v.kids, here);
+    return Ok(SRes { doc: doc, out: one(kid) });
+}
+
+pub fn leaf_index(doc: JDoc, idx: Int, k: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "null" { return Ok(null_result(doc)); }
+    if v.kind == "object" { return leaf_field(doc, idx, k.to_string()); }
+    if v.kind != "array" {
+        return Err(index_slot(v.kind));
+    }
+    let len: Int = list_len(v.kids);
+    let mut here: Int = k;
+    if here < 0 { here = len + here; }
+    if here < 0 || here >= len { return Ok(null_result(doc)); }
+    let kid: Int = list_get(v.kids, here);
+    return Ok(SRes { doc: doc, out: one(kid) });
+}
+
+fn slice_start(lo: Int, len: Int) -> Int {
+    if lo == open_bound() { return 0; }
+    let mut s: Int = lo;
+    if s < 0 { s = len + s; }
+    if s < 0 { return 0; }
+    return s;
+}
+
+// The end of a slice is a position in the array, and a position cannot run past
+// the last element. The bound was returned unclamped, so [1,2,3][0:5] — the
+// ordinary way of asking for a window wider than the array — walked list_get
+// off the end of the children and died on an out of bounds read rather than
+// answering [1,2,3]. A bound past the end is the normal case, not the edge one:
+// nobody knows the length in advance, which is why one reaches for a slice.
+fn slice_end(hi: Int, len: Int) -> Int {
+    if hi == open_bound() { return len; }
+    let mut e: Int = hi;
+    if e < 0 { e = len + e; }
+    if e < 0 { return 0; }
+    if e > len { return len; }
+    return e;
+}
+
+// A slice is a value of its own, so it is minted as a fresh array node rather
+// than streamed out element by element.
+pub fn leaf_slice(doc: JDoc, idx: Int, lo: Int, hi: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "null" { return Ok(null_result(doc)); }
+    if v.kind != "array" {
+        return Err("cannot slice a " + v.kind);
+    }
+    let len: Int = list_len(v.kids);
+    let mut s: Int = slice_start(lo, len);
+    let mut e: Int = slice_end(hi, len);
+    if e < s { e = s; }
+    let mut kids: List[Int] = list_new();
+    while s < e {
+        kids = list_push(kids, list_get(v.kids, s));
+        s = s + 1;
+    }
+    return Ok(array_result(doc, kids));
+}
+
+pub fn leaf_iterate(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" && v.kind != "object" {
+        return Err("Cannot iterate over " + kind_word(v.kind) + " (" + value_word(v) + ")");
+    }
+    return Ok(SRes { doc: doc, out: v.kids });
+}
+
+// Depth first and parent first, which is the order jq's ".." prints in.
+fn descend_here(doc: JDoc, acc: List[Int], idx: Int) -> List[Int] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" && v.kind != "object" { return acc; }
+    let mut out: List[Int] = acc;
+    let mut i: Int = 0;
+    while i < list_len(v.kids) {
+        let kid: Int = list_get(v.kids, i);
+        out = concat_indices(out, one(kid));
+        out = descend_here(doc, out, kid);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn leaf_recurse(doc: JDoc, idx: Int) -> SRes {
+    return SRes { doc: doc, out: descend_here(doc, one(idx), idx) };
+}
+
+// A fractional value is minted from its written text, so the arena never has to
+// hold a Float it could not print again.
+pub fn float_result(doc: JDoc, text: String) -> SRes {
+    let p: PRes = jdoc_push(doc, jval_float(text));
+    return SRes { doc: p.doc, out: one(p.idx) };
+}
+
+// The digits of a number node, whether it was written as an integer or as a
+// decimal, so the arithmetic layer never has to know which it is holding.
+pub fn num_of(v: JVal) -> Result[Num, String] {
+    if v.kind == "int" { return Ok(num_from_int(v.ival)); }
+    if v.kind == "float" { return Ok(num_read(v.sval)); }
+    return Err("expected a number, not a " + v.kind);
+}
+
+// The other direction from num_of, and its exact undo: a number comes back as
+// an integer whenever its written form has no fraction left, so 1.5 + 1 is 2.5
+// and 2.0 + 1 is 3, exactly as jq prints them. The sign goes back onto the front
+// for the same reason num_from_int takes it off on the way in: a digit run
+// carries no sign of its own, and a run read with a minus in front of it hands
+// back the magnitude. Without this, -3.5 | floor printed 4.
+// Two cases cannot be an Int node and go out as written text instead. One is a
+// result whose digits no longer fit, so 9223372036854775807 + 1 is
+// 9223372036854775808 and not the negative number a truncating parse gives back.
+// The other is a negative zero, which an Int has no room for: 0 - 0 is 0.
+pub fn num_node(doc: JDoc, v: Num) -> SRes {
+    let neg_zero: Bool = v.neg && v.ip == "0" && chars_len(v.fp) == 0;
+    if chars_len(v.fp) == 0 && fits_int_text(v.ip) && !neg_zero {
+        if v.neg { return int_result(doc, 0 - parse_int_digits(v.ip)); }
+        return int_result(doc, parse_int_digits(v.ip));
+    }
+    return float_result(doc, num_text(v));
+}
+
+// jq folds both kinds into "number", so a fold has to accept either.
+pub fn is_number_kind(k: String) -> Bool {
+    return k == "int" || k == "float";
+}
+
+// Everything the grammar can hang off a value is applied here, once per value
+// in the stream, so a constant written inside a filter is answered once per
+// value rather than once for the whole run.
+pub fn step_on(doc: JDoc, here: Int, n: ANode) -> Result[SRes, String] {
+    if n.kind == "str" { return Ok(str_result(doc, n.sval)); }
+    if n.kind == "int" { return Ok(int_result(doc, n.ival)); }
+    if n.kind == "float" { return Ok(float_result(doc, n.sval)); }
+    if n.kind == "true" { return Ok(bool_result(doc, true)); }
+    if n.kind == "false" { return Ok(bool_result(doc, false)); }
+    if n.kind == "null" { return Ok(null_result(doc)); }
+    return Ok(leaf_recurse(doc, here));
+}
+
+pub fn eval_each(ast: AList, node: Int, doc: JDoc, input: List[Int]) -> Result[SRes, String] {
+    let n: ANode = ast_at(ast, node);
+    let mut out: List[Int] = list_new();
+    let mut live: JDoc = doc;
+    let mut i: Int = 0;
+    while i < list_len(input) {
+        let here: Int = list_get(input, i);
+        let r: Result[SRes, String] = step_on(live, here, n);
+        match r {
+            Err(e) => { return Err(e); }
+            Ok(v) => { live = v.doc; out = concat_indices(out, v.out); }
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}

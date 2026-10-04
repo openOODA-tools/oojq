@@ -1,0 +1,166 @@
+// # Reading And Writing A Number As Text
+//
+// Logline: Turns a written number into a sign, an integer part, and a fraction, and writes those parts back out.
+//
+// Setup: Pure, no capability needed. oodac lowers to_string on a Float to an integer call, so a fractional value cannot be printed by the runtime here all; keeping the digits is what lets oojq answer for one.
+// Beats:
+//   1. Strip the sign, split on the point, and move the point for a written exponent.
+//   2. Normalise away leading and trailing zeros so two spellings of one number read the same.
+//   3. Write the parts back in the shortest form that still means the same value.
+
+import "filter/syntax/scan/parse_lit.oo";
+
+type Num = struct {
+    neg: Bool,
+    ip: String,
+    fp: String
+};
+
+pub fn num_is_zero(n: Num) -> Bool {
+    return n.ip == "0" && n.fp == "";
+}
+
+fn zeros(k: Int) -> String {
+    let mut s: String = "";
+    let mut i: Int = 0;
+    while i < k {
+        s = s + "0";
+        i = i + 1;
+    }
+    return s;
+}
+
+fn strip_lead_zeros(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    while i < n - 1 && char_at(s, i) == "0" {
+        i = i + 1;
+    }
+    return str_slice(s, i, n);
+}
+
+fn strip_trail_zeros(s: String) -> String {
+    let mut n: Int = chars_len(s);
+    while n > 0 && char_at(s, n - 1) == "0" {
+        n = n - 1;
+    }
+    return str_slice(s, 0, n);
+}
+
+// Normalising keeps the sign of a zero. IEEE 754 has two of them and jq writes
+// the negative one as -0, which is what 0 * -1 and (-0.4)|round both come to;
+// collapsing the sign here is what made those answer a plain 0. A zero with a
+// fraction is a different thing and still loses both, so 0.00 and -0.00 are 0.
+pub fn num_norm(neg: Bool, ip: String, fp: String) -> Num {
+    let head: String = strip_lead_zeros(ip);
+    let tail: String = strip_trail_zeros(fp);
+    if chars_len(head) == 0 {
+        return num_norm(neg, "0", "");
+    }
+    return Num { neg: neg, ip: head, fp: tail };
+}
+
+pub fn digit_of(c: String) -> Int {
+    let s: String = "0123456789";
+    let mut i: Int = 0;
+    while i < 10 {
+        if char_at(s, i) == c { return i; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// A digit past the end of a run is a zero, which is what makes a short
+// fraction comparable with a long one.
+pub fn digit_at(s: String, i: Int) -> Int {
+    if i >= chars_len(s) { return 0; }
+    return digit_of(char_at(s, i));
+}
+
+fn char_of_digit(d: Int) -> String {
+    let s: String = "0123456789";
+    return char_at(s, d);
+}
+
+// Place the point point digits from the left of digits, so a written exponent
+// turns 1e5 into one hundred thousand with no arithmetic here all.
+fn split_point(digits: String, point: Int) -> Num {
+    let n: Int = chars_len(digits);
+    if point <= 0 {
+        return num_norm(false, "0", zeros(0 - point) + digits);
+    }
+    if point >= n {
+        return num_norm(false, digits + zeros(point - n), "");
+    }
+    let head: String = str_slice(digits, 0, point);
+    let tail: String = str_slice(digits, point, n);
+    return num_norm(false, head, tail);
+}
+
+pub fn num_read(s: String) -> Num {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    let mut neg: Bool = false;
+    if i < n && char_at(s, 0) == "-" {
+        neg = true;
+        i = i + 1;
+    } else if i < n && char_at(s, 0) == "+" {
+        i = i + 1;
+    }
+    let mut ip: String = "";
+    while i < n && digit_char(char_at(s, i)) {
+        ip = ip + char_at(s, i);
+        i = i + 1;
+    }
+    let mut fp: String = "";
+    if i < n && char_at(s, i) == "." {
+        i = i + 1;
+        while i < n && digit_char(char_at(s, i)) {
+            fp = fp + char_at(s, i);
+            i = i + 1;
+        }
+    }
+    let mut exp: Int = 0;
+    if i < n && (char_at(s, i) == "e" || char_at(s, i) == "E") {
+        i = i + 1;
+        let mut esign: Int = 1;
+        if i < n && char_at(s, i) == "-" {
+            esign = 0 - 1;
+            i = i + 1;
+        } else if i < n && char_at(s, i) == "+" {
+            i = i + 1;
+        }
+        while i < n && digit_char(char_at(s, i)) {
+            exp = exp * 10 + digit_of(char_at(s, i));
+            i = i + 1;
+        }
+        exp = exp * esign;
+    }
+    let digits: String = ip + fp;
+    let moved: Num = split_point(digits, chars_len(ip) + exp);
+    return num_norm(neg, moved.ip, moved.fp);
+}
+
+pub fn num_text(v: Num) -> String {
+    let head: String = v.ip;
+    let tail: String = v.fp;
+    let body: String = head;
+    if chars_len(tail) == 0 {
+        if v.neg { return "-" + body; }
+        return body;
+    }
+    let joined: String = body + "." + tail;
+    if v.neg { return "-" + joined; }
+    return joined;
+}
+
+// The sign goes in the sign and not in front of the digits. Leaving it in the
+// digit run is what made (-3) + 0 answer 3: every helper below reads digits,
+// digit_of("-" ) is 0, and a run that starts with a minus is read as though the
+// minus were not there. Two helpers are enough to keep it out, this one and
+// num_node on the way back out.
+pub fn num_from_int(v: Int) -> Num {
+    if v < 0 { return num_norm(true, (0 - v).to_string(), ""); }
+    return num_norm(false, v.to_string(), "");
+}
+

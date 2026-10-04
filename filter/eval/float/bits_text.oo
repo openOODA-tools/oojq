@@ -1,0 +1,181 @@
+// # Bits Back To The Shortest Text
+//
+// Logline: Turns the 16 hex digits of a binary64 back into the fewest decimal digits that read as that same double, written the way jq writes one.
+// Setup: Pure, no capability needed. Reads the words decimal_bits writes and hands them back through decimal_bits to prove each answer, so the two ends of the round trip check each other rather than trusting either.
+// Beats:
+//   1. Take the word apart into a sign, an exponent, and a significand.
+//   2. Expand exactly, then drop digits one at a time while the word still reads back the same.
+//   3. Write it fixed or scientific on the rule measured from jq, not from a guess at a standard.
+
+import "filter/eval/num_read.oo";
+import "filter/eval/num/num_add.oo";
+import "filter/eval/float/decimal_bits.oo";
+import "filter/eval/float/exact_digits.oo";
+import "filter/eval/float/float_word.oo";
+
+fn bt_zeros(k: Int) -> String {
+    let mut s: String = "";
+    let mut i: Int = 0;
+    while i < k {
+        s = s + "0";
+        i = i + 1;
+    }
+    return s;
+}
+
+fn bt_inc(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut out: String = s;
+    let mut i: Int = n - 1;
+    while i >= 0 {
+        let d: Int = digit_at(out, i);
+        if d < 9 {
+            return str_slice(out, 0, i) + char_at("0123456789", d + 1) + bt_zeros(n - i - 1);
+        }
+        out = str_slice(out, 0, i) + "0";
+        i = i - 1;
+    }
+    return "1" + out;
+}
+
+fn bt_strip_trail(s: String) -> String {
+    let mut n: Int = chars_len(s);
+    while n > 1 && char_at(s, n - 1) == "0" { n = n - 1; }
+    return str_slice(s, 0, n);
+}
+
+// The first digit past the one being kept, and whether anything nonzero sits
+// behind it. Those two answers are the whole of the rounding decision: a 5 with
+// a tail is above the halfway point, a 5 with nothing behind it is exactly on
+// it and goes to the even neighbour, and anything else is simply nearer.
+fn bt_round(d: String, p: Int) -> String {
+    let n: Int = chars_len(d);
+    if p >= n { return d; }
+    let head: String = str_slice(d, 0, p);
+    let first: Int = digit_at(d, p);
+    let mut tail: Bool = false;
+    let mut i: Int = p + 1;
+    while i < n {
+        if digit_at(d, i) != 0 { tail = true; }
+        i = i + 1;
+    }
+    if first > 5 { return bt_inc(head); }
+    if first < 5 { return head; }
+    if tail { return bt_inc(head); }
+    if digit_at(head, p - 1) % 2 == 1 { return bt_inc(head); }
+    return head;
+}
+
+fn bt_plain(c: String, dp: Int) -> String {
+    let n: Int = chars_len(c);
+    if dp <= 0 { return "0." + bt_zeros(0 - dp) + c; }
+    if dp >= n { return c + bt_zeros(dp - n); }
+    return str_slice(c, 0, dp) + "." + str_slice(c, dp, n);
+}
+
+
+fn bt_exp_text(v: Int) -> String {
+    let mut mag: String = (v).to_string();
+    if chars_len(mag) < 2 { mag = "0" + mag; }
+    return mag;
+}
+
+fn bt_sci(c: String, dp: Int) -> String {
+    let n: Int = chars_len(c);
+    let exp10: Int = dp - 1;
+    let mut mant: String = char_at(c, 0);
+    if n > 1 { mant = mant + "." + str_slice(c, 1, n); }
+    if exp10 < 0 { return mant + "e-" + bt_exp_text(0 - exp10); }
+    return mant + "e+" + bt_exp_text(exp10);
+}
+
+// Measured from jq, and the rule is not the one a standard would suggest. jq
+// writes a double in full when the number is at least 1e-4, and writes it as an
+// exponent when the full form would end in sixteen or more zeros after the
+// significant digits. Both halves are needed: 1e+16 is written as an exponent
+// while 1.1e+16 is not, and 1e15 is written out while 1e+17 is not, and both
+// pairs sit at the same place on the number line. The exponent is lower case,
+// always signed, and never narrower than two digits, so 1e-5 comes out 1e-05.
+// A computed double that is whole is written without a point: 1.0*1 prints 1.
+fn bt_render(c: String, dp: Int, neg: Bool) -> String {
+    let n: Int = chars_len(c);
+    let mut sci: Bool = false;
+    if dp < 0 - 3 { sci = true; }
+    if (dp - n) >= 16 { sci = true; }
+    let mut body: String = "";
+    if sci { body = bt_sci(c, dp); }
+    if !sci { body = bt_plain(c, dp); }
+    if neg { return "-" + body; }
+    return body;
+}
+
+pub fn bits_text(hex: String) -> Result[String, String] {
+    let w: Word = word_read(hex);
+    if w.tiny && w.m == 0 {
+        if w.neg { return Ok("-0"); }
+        return Ok("0");
+    }
+    let neg: Bool = w.neg;
+    // No special case for a subnormal is needed HERE, and an earlier version of
+    // this comment tried to add one. exact_digits takes a significand and an
+    // exponent and returns significand * 2^(exponent - 52), and word_read
+    // already hands a subnormal the exponent -1022 rather than 0, so
+    // w.m * 2^(-1022-52) is w.m * 2^-1074, which is the subnormal's own value.
+    // Passing -1074 instead gives m * 2^-1126, a value 2^52 too small, and the
+    // search then finds no candidate that reads back and publishes the whole
+    // three hundred digit expansion as the shortest form.
+    let ex: Exact = exact_digits(w.m, w.e2);
+    let d: String = ex.digits;
+    let dp0: Int = ex.dp;
+    // There is no short cut through the search. Seventeen digits is how many a
+    // double can be pinned BY, not how many it needs, so an expansion of
+    // exactly seventeen may still have a sixteen digit answer waiting below it:
+    // 794379958272090.75 is the exact value of the double jq writes
+    // 794379958272090.8, and taking the seventeen digits as final printed the
+    // exact value instead of the number. The loop below stops at the first
+    // candidate that reads back the same, which is the shortest by
+    // construction, and a value that needs all seventeen still terminates there.
+    // The largest double, exactly, as the number a candidate has to stay under
+    // to be a candidate at all. Taken from a WORD rather than written out as a
+    // decimal, so it cannot itself be mistyped: a 300 digit literal in a
+    // comment above a comparison is a bug waiting for the day it matters.
+    let top: Num = word_num("7fefffffffffffff");
+    let mut p: Int = 1;
+    while p <= 17 {
+        let head: String = bt_round(d, p);
+        // Rounding 9.99 up is 10.0, one digit wider than what was asked for, and
+        // the point moves with it. Holding dp still would place that candidate
+        // a factor of ten below the value it is meant to be.
+        let mut dp: Int = dp0;
+        if chars_len(head) > p { dp = dp0 + 1; }
+        let c: String = bt_strip_trail(head);
+        // A candidate that will not fit is not a candidate, and "will not fit"
+        // has to be asked DIRECTLY now. It used to be answered by decimal_bits
+        // refusing: rounding the largest double to one digit gives 2e308, which
+        // is past the top, and the refusal was the signal to skip it. jq clamps
+        // an overflow rather than refusing one, so decimal_bits now answers
+        // 7fefffffffffffff for 2e308, and that is the SAME word this search is
+        // looking for. Without the guard below the largest double is published
+        // as 2e+308, which is not a double at all and not a rendering of one.
+        // The clamp is right for arithmetic and wrong here, because "reads back
+        // as this double" has to mean "is this double's correctly rounded
+        // decimal" and not "clamps into the same place".
+        let plain: String = bt_plain(c, dp);
+        let over: Bool = num_cmp(num_read(plain), top) > 0;
+        if !over {
+            // The probe carries the sign, or a negative word is checked against
+            // a positive reading of itself and never matches: -0.1 fell through
+            // the whole search and printed its own 55 digit expansion.
+            let mut probe: String = plain;
+            if neg { probe = "-" + probe; }
+            match decimal_bits(probe) {
+                Ok(back) => {
+                    if back == hex { return Ok(bt_render(c, dp, neg)); }
+                }
+                Err(e) => { let skip: String = e; }
+            }
+        }
+        p = p + 1;
+    }
+    return Ok(bt_render(bt_strip_trail(d), dp0, neg));
+}

@@ -1,0 +1,256 @@
+// # Division And Multiplication
+//
+// Logline: Answers the operators whose answer is not a single digit fold: dividing, multiplying, and repeating a string.
+//
+// Setup: Pure, no capability needed. Each is exact or refused, so none ever has to round an answer it cannot justify.
+// Beats:
+//   1. Divide by long division, one digit here a time, and stop when the remainder runs out.
+//   2. Lift both sides to whole numbers over the same power of ten, so a decimal divides as exactly as a whole one.
+//   3. Multiply two digit runs the way they are on paper, so 0.1 * 0.2 is 0.02.
+
+import "filter/eval/num_read.oo";
+import "filter/eval/num/num_add.oo";
+import "filter/eval/eval_leaf.oo";
+import "filter/eval/float_op.oo";
+import "filter/select_node.oo";
+import "render/render_value.oo";
+import "std/core/primitives/str.oo";
+
+fn repeat_to(s: String, n: Int) -> String {
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        out = out + s;
+        i = i + 1;
+    }
+    return out;
+}
+
+// The two sides lifted to whole numbers over the same power of ten, so that a
+// divided by b is exactly p over d. Nothing is rounded on the way in: the
+// points are moved by writing zeros, which is a move and not a division. The
+// divisor is held to seventeen digits and the dividend to eighteen, because the
+// long division forms a remainder ten times the divisor and that has to fit.
+fn wide(p: String) -> Bool {
+    if chars_len(p) > 18 { return true; }
+    return false;
+}
+
+fn too_wide(d: String) -> Bool {
+    if chars_len(d) > 17 { return true; }
+    return false;
+}
+
+type Lift = struct {
+    p: String,
+    d: String
+};
+
+fn lift(a: Num, b: Num) -> Lift {
+    let wa: Int = chars_len(a.fp);
+    let wb: Int = chars_len(b.fp);
+    let p: String = a.ip + a.fp + zeros(wb);
+    let d: String = b.ip + b.fp + zeros(wa);
+    return Lift { p: p, d: d };
+}
+
+fn digit_run(d: Int) -> String {
+    let s: String = "0123456789";
+    return char_at(s, d);
+}
+
+// The whole part, and then one fraction digit at a time while the remainder
+// lasts. A quotient that does not terminate is refused rather than printed with
+// a made up tail, and one wider than a whole number can hold is refused rather
+// than wrapped. Seventeen fraction places is the widest this will name.
+fn divide_run(p: String, d: String, neg: Bool) -> Result[Num, String] {
+    if wide(p) {
+        return Err("this division is over a number of more than eighteen digits, which does not fit here");
+    }
+    if too_wide(d) {
+        return Err("this division is over a number of more than seventeen digits, which does not fit here");
+    }
+    let di: Int = parse_int_digits(d);
+    if di == 0 {
+        return Err("this division is over a zero divisor, which has no whole part to hold");
+    }
+    let pi: Int = parse_int_digits(p);
+    let whole: Int = pi / di;
+    let mut rem: Int = pi % di;
+    let mut frac: String = "";
+    let mut steps: Int = 0;
+    while rem != 0 {
+        rem = rem * 10;
+        frac = frac + digit_run(rem / di);
+        rem = rem % di;
+        steps = steps + 1;
+        if steps > 17 {
+            return Err("this quotient does not terminate, so this build refuses it");
+        }
+    }
+    let run: Num = point_back(whole.to_string() + frac, chars_len(frac));
+    if neg { return Ok(num_neg(run)); }
+    return Ok(run);
+}
+
+// Dividing was a whole-number-only operation, so 1.5 / 0.5 was refused even
+// though its answer is 3 and is as exact as anything else here. It is the same
+// long division with the points lifted off first.
+pub fn op_div(doc: JDoc, x: Int, y: Int) -> Result[SRes, String] {
+    let a: JVal = jval_at(doc, x);
+    let b: JVal = jval_at(doc, y);
+    if !is_number_kind(a.kind) || !is_number_kind(b.kind) {
+        return Err(cannot_pair(doc, x, y, "divided"));
+    }
+    let na: Result[Num, String] = num_of(a);
+    let nb: Result[Num, String] = num_of(b);
+    match na {
+        Err(e) => { return Err(e); }
+        Ok(pa) => {
+            match nb {
+                Err(e) => { return Err(e); }
+                Ok(pb) => {
+                    if num_is_zero(pb) {
+                        return Err(cannot_pair(doc, x, y, "divided") + " because the divisor is zero");
+                    }
+                    // Either side written with a point takes the quotient through
+                    // a double, as jq and the hardware do. Two whole numbers try
+                    // the exact long division first, the only thing here that can
+                    // answer a quotient past the 53 bits a double holds. The zero
+                    // divisor is caught first, so the sentence naming both
+                    // operands is jq's either way.
+                    if a.kind == "float" || b.kind == "float" { return float_binop(doc, "/", x, y); }
+                    let neg: Bool = pa.neg != pb.neg;
+                    let up: Lift = lift(pa, pb);
+                    let q: Result[Num, String] = divide_run(up.p, up.d, neg);
+                    match q {
+                        // The long division refuses a quotient that never ends and
+                        // one too wide for a 63-bit Int. jq answers both, so the
+                        // double takes over rather than a refusal standing: 1/3 is
+                        // jq's 0.3333333333333333, while 10/4 stays the exact 2.5.
+                        Err(e) => { let drop: String = e; return float_binop(doc, "/", x, y); }
+                        Ok(n) => { return Ok(num_node(doc, n)); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A remainder is the dividend less the divisor taken as many whole times as
+// will go, so 5.5 % 2 is 1.5 and 7 % 3.5 is 0. Only the whole of the quotient
+// is ever needed, so the repeating case a division can have cannot arise here.
+//
+// jq does not do this. It throws both fractions away FIRST and then takes an
+// integer remainder, so 5.5 % 2 is 1, 7 % 3.5 is 1, and 1 % 0.5 is refused
+// outright because 0.5 truncates to a zero divisor. Twenty-one probes agree
+// with that reading and none with a real remainder, so it is a rule and not an
+// accident — and this page used to answer the true remainder instead, on the
+// ground that jq's is arithmetically wrong. 7 = 2 * 3.5 + 1 is false.
+//
+// It now matches jq. The arithmetic argument is a real one and it is still
+// true, but "more exactly than jq" is not "better than jq" when what jq does is
+// a deliberate, measured choice that a migrating script can depend on: the two
+// answers differ on a non-integer operand and NOTHING errors. A tool whose
+// selling point is jq compatibility cannot hand back a different number without
+// a word about it, and the cost of matching is three lines. Every other float
+// divergence this round moved the same way, and the float ones did not even
+// have this argument to make.
+//
+// The identity a = q * b + r holds below only when both operands are whole,
+// which is exactly where the two definitions agree.
+pub fn op_mod(doc: JDoc, x: Int, y: Int) -> Result[SRes, String] {
+    let a: JVal = jval_at(doc, x);
+    let b: JVal = jval_at(doc, y);
+    if !is_number_kind(a.kind) || !is_number_kind(b.kind) {
+        return Err(cannot_pair(doc, x, y, "divided (remainder)"));
+    }
+    let na: Result[Num, String] = num_of(a);
+    let nb: Result[Num, String] = num_of(b);
+    match na {
+        Err(e) => { return Err(e); }
+        Ok(pa) => {
+            match nb {
+                Err(e) => { return Err(e); }
+                Ok(pb) => {
+                    // Truncation is TOWARD ZERO and not a floor: -5.5 % 2 is
+                    // -1 under it and 0 under a floor, and jq says -1. Dropping
+                    // the fraction keeps the sign field, so the left operand is
+                    // still the sign of the answer in every combination.
+                    let ta: Num = Num { neg: pa.neg, ip: pa.ip, fp: "" };
+                    let tb: Num = Num { neg: pb.neg, ip: pb.ip, fp: "" };
+                    if num_is_zero(tb) {
+                        return Err(cannot_pair(doc, x, y, "divided (remainder)") + " because the divisor is zero");
+                    }
+                    let neg: Bool = ta.neg != tb.neg;
+                    let up: Lift = lift(ta, tb);
+                    if wide(up.p) || too_wide(up.d) {
+                        return Err("this remainder is over a number too wide to hold exactly here");
+                    }
+                    let q: Int = parse_int_digits(up.p) / parse_int_digits(up.d);
+                    let take: Num = num_mul(num_norm(neg, q.to_string(), ""), tb);
+                    return Ok(num_node(doc, num_sub(ta, take)));
+                }
+            }
+        }
+    }
+}
+
+// Two digit runs multiplied the way they are on paper: one partial product per
+// digit of the second factor, each written one place further left than the last
+// and added into an accumulator. The accumulator is n+m wide because that is
+// the widest a product of n by m can be, so nothing is ever carried off the end
+// and nothing is ever truncated. No step leaves the string, so no step rounds.
+//
+// This is where oojq is better than jq rather than equal to it. jq multiplies in
+// IEEE doubles, so 0.1 * 0.2 is 0.020000000000000004 and 1.23456789 * itself is
+// 1.5241578750190519. Both are the double nearest the answer, and neither is the
+// answer. The exact products are 0.02 and 1.5241578750190521, and those are
+// what come out here.
+fn mul_run(x: String, y: String) -> String {
+    let n: Int = chars_len(x);
+    let m: Int = chars_len(y);
+    let mut acc: String = zeros(n + m);
+    let mut j: Int = 0;
+    while j < m {
+        let dy: Int = digit_at(y, m - 1 - j);
+        if dy != 0 {
+            let mut carry: Int = 0;
+            let mut row: String = "";
+            let mut i: Int = 0;
+            while i < n {
+                let t: Int = digit_at(x, n - 1 - i) * dy + carry;
+                row = digit_run(t % 10) + row;
+                carry = t / 10;
+                i = i + 1;
+            }
+            // The carry is written even when it is zero, so that every partial
+            // product is the same width and the shifts line up under it.
+            acc = add_run(acc, digit_run(carry) + row + zeros(j));
+        }
+        j = j + 1;
+    }
+    return strip_lead_zeros(acc);
+}
+
+// Both factors are lifted to the same number of decimal places first, so the
+// product of the lifted whole numbers is the product scaled by one power of ten
+// squared, and the point goes back that many places from the right. The product
+// is padded on the left when it is shorter than the point needs, which is what
+// makes 0.5 * 0.5 come out as 0.25 and not as 25.
+// The sign is put on by hand rather than through num_neg, because num_neg
+// leaves a zero alone and a zero product is exactly the case that has to keep
+// it: 0 * -1 is -0, and asking num_neg left it a plain 0.
+pub fn num_mul(a: Num, b: Num) -> Num {
+    let wa: Int = chars_len(a.fp);
+    let wb: Int = chars_len(b.fp);
+    let mut w: Int = wa;
+    if wb > w { w = wb; }
+    let x: String = a.ip + a.fp + zeros(w - wa);
+    let y: String = b.ip + b.fp + zeros(w - wb);
+    let places: Int = w * 2;
+    let product: Num = point_back(mul_run(x, y), places);
+    if a.neg != b.neg { return Num { neg: true, ip: product.ip, fp: product.fp }; }
+    return product;
+}
+

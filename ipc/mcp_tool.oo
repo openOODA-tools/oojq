@@ -1,0 +1,99 @@
+// # MCP Tool Surface
+//
+// Logline: Answers a tool call by running a filter, and publishes exactly which filters this build accepts.
+//
+// Setup: Pure, no capability needed. A tool call is a filter run over a document that arrived as text.
+// Beats:
+//   1. jq runs a filter and returns what the same filter would print on the command line, which is one value per line when the filter streams.
+//   2. jq_check parses a filter and reports the parser's own message, so a caller learns it is wrong before it is expensive.
+//   3. jq_grammar publishes the builtins this build really has, which is what keeps a caller from asking for ascii or splits.
+
+import "parse/anchor.oo";
+import "filter/filter_eval.oo";
+import "filter/syntax/anchor.oo";
+import "render/render_value.oo";
+import "ipc/mcp_reply.oo";
+
+// The advertised tool list. The descriptions are the contract: a caller reads
+// them, so what is claimed here has to be what jq.oo actually does.
+pub fn mcp_tools_schema() -> String {
+    return "{\"tools\":["
+        + mcp_tool_json("jq", "Run a jq filter over a JSON document and return the results as text, one value per line.",
+            "{\"filter\":{\"type\":\"string\",\"description\":\"The filter, in oojq syntax.\"},"
+            + "\"input\":{\"type\":\"string\",\"description\":\"The document as JSON text.\"}}")
+        + "," + mcp_tool_json("jq_check", "Parse a filter and report whether this build accepts it, with the parser's own error message when it does not.",
+            "{\"filter\":{\"type\":\"string\",\"description\":\"The filter to check.\"}}")
+        + "," + mcp_tool_json("jq_grammar", "List the filters and builtins this build supports, including the ones it refuses and why.",
+            "{\"filter\":{\"type\":\"string\"}}")
+        + "]}";
+}
+
+fn mcp_tool_json(name: String, blurb: String, schema: String) -> String {
+    return "{\"name\":" + mcp_json_string(name)
+        + ",\"description\":" + mcp_json_string(blurb)
+        + ",\"inputSchema\":" + schema + "}";
+}
+
+fn mcp_json_string(s: String) -> String {
+    return "\"" + render_string(s) + "\"";
+}
+
+// A tool result is text. A filter that selected nothing is a valid answer that
+// happens to be empty, which is not the same as an error, so it is not dressed
+// up as one.
+fn mcp_ok(text: String) -> String {
+    return mcp_text_payload(text);
+}
+
+fn mcp_fail(message: String) -> String {
+    return mcp_text_payload("oojq: " + message);
+}
+
+// The document a call arrived with is JSON text. It is handed to the one reader
+// this program has, straight, because the field it came from was already
+// decoded on the way out. It used to be assembled by hand from jdoc_new and
+// pushed onto, which never gave the evaluator the root it seeds from, and every
+// tool call that got that far died without writing a byte.
+fn mcp_input_doc(text: String) -> Result[JDoc, String] {
+    let parsed: Result[JDoc, String] = parse_document(text);
+    match parsed {
+        Err(e) => { return Err("input is not valid JSON: " + e); }
+        Ok(d) => { return Ok(d); }
+    }
+}
+
+pub fn mcp_run_jq(doc: JDoc) -> String {
+    let filter: String = mcp_text_field(doc, ".params.arguments.filter");
+    if chars_len(filter) == 0 { return mcp_fail("the jq tool needs a filter"); }
+    let input: String = mcp_text_field(doc, ".params.arguments.input");
+    match mcp_input_doc(input) {
+        Err(e) => { return mcp_fail(e); }
+        Ok(d) => {
+            let got: Result[SRes, String] = filter_eval(d, filter);
+            match got {
+                Err(e) => { return mcp_fail("filter \"" + filter + "\": " + e); }
+                Ok(r) => {
+                    let live: JDoc = r.doc;
+                    let found: List[Int] = r.out;
+                    if list_len(found) == 0 { return mcp_ok(""); }
+                    let text: String = render_stream(live, found, false);
+                    return mcp_ok(text);
+                }
+            }
+        }
+    }
+}
+
+pub fn mcp_run_check(doc: JDoc) -> String {
+    let filter: String = mcp_text_field(doc, ".params.arguments.filter");
+    if chars_len(filter) == 0 { return mcp_fail("the jq_check tool needs a filter"); }
+    // Parse only, deliberately. Running the filter needs a document, and any
+    // document chosen here would reject valid filters for reasons that have
+    // nothing to do with the filter, which is exactly what this tool promises
+    // not to do. parse_filter is the whole check, and it costs no evaluation.
+    let got: Result[POut, String] = parse_filter(filter);
+    match got {
+        Err(e) => { return mcp_fail("rejected: " + e); }
+        Ok(r) => { return mcp_ok("accepted"); }
+    }
+}

@@ -1,0 +1,222 @@
+// # Division, Rounded Once
+//
+// Logline: Divides two binary64 words the way hardware does, by building the quotient in decimal digits first, then letting one existing converter round it exactly once.
+//
+// Setup: Pure, no capability needed. The two ends are the same ones the other float pages use: word_read in, decimal_bits out. Nothing here is a guess about a double, and every step between the two words is a digit run.
+// Beats:
+//   1. Take seventeen digits of each side and long-divide them, which is the most a 63-bit Int can hold without the carry overflowing.
+//   2. Scale the quotient back into the operands' units and take the exact residual with dd_mul, then correct it with a second long division. That is thirty-three digits, far past the seventeen a double is pinned by.
+//   3. Round once with decimal_bits, then PROVE the answer with an exact midpoint test, so a value sitting on a boundary is decided by comparison and not by luck.
+
+import "filter/eval/num_read.oo";
+import "filter/eval/num/num_add.oo";
+import "filter/eval/float/float_ops.oo";
+import "filter/eval/float/decimal_bits.oo";
+import "filter/eval/float/exact_digits.oo";
+import "filter/eval/float/float_word.oo";
+import "std/core/primitives/str.oo";
+
+// A value held as seventeen significant digits and a power of ten, so that the
+// long division below has two integers it can hold and a scale it remembers.
+type NM = struct {
+    m: String,
+    p: Int
+};
+
+fn fd_zeros(k: Int) -> String {
+    let mut s: String = "";
+    let mut i: Int = 0;
+    while i < k { s = s + "0"; i = i + 1; }
+    return s;
+}
+
+fn fd_fs(k: Int) -> String {
+    let mut s: String = "";
+    let mut i: Int = 0;
+    while i < k { s = s + "f"; i = i + 1; }
+    return s;
+}
+
+// The seventeen digits and the power, from a positive Num. The point is dropped
+// and only its width is kept, so the value is the digits ip+fp times ten to the
+// minus the width of fp. Seventeen is the most a 63-bit Int holds while leaving
+// the remainder times ten below the top of the range: the remainder is below the
+// divisor, which is below ten to the seventeen, so ten times it is below ten to
+// the eighteen, and the widest Int is nine to the eighteen.
+fn fd_norm(v: Num) -> NM {
+    let d: String = v.ip + v.fp;
+    let n: Int = chars_len(d);
+    let mut s: Int = 0;
+    while s < n - 1 && char_at(d, s) == "0" { s = s + 1; }
+    let ds: String = str_slice(d, s, n);
+    let l: Int = chars_len(ds);
+    let e: Int = (l - 1) - chars_len(v.fp);
+    let mut m: String = "";
+    if l >= 17 { m = str_slice(ds, 0, 17); }
+    if l < 17 { m = ds + fd_zeros(17 - l); }
+    return NM { m: m, p: e - 16 };
+}
+
+// Long division of the two seventeen digit halves, one digit at a time, the way
+// it is done on paper. It hands back the whole part and then k places as one
+// digit run with the point k from the right, so point_back reads it straight off.
+fn fd_ldig(mx: Int, my: Int, k: Int) -> String {
+    let mut rem: Int = mx % my;
+    let mut out: String = (mx / my).to_string();
+    let mut i: Int = 0;
+    while i < k {
+        rem = rem * 10;
+        out = out + char_at("0123456789", rem / my);
+        rem = rem % my;
+        i = i + 1;
+    }
+    return out;
+}
+
+fn fd_point(d: String, p: Int) -> Num {
+    let n: Int = chars_len(d);
+    if p <= 0 { return num_norm(false, "0", fd_zeros(0 - p) + d); }
+    if p >= n { return num_norm(false, d + fd_zeros(p - n), ""); }
+    return num_norm(false, str_slice(d, 0, p), str_slice(d, p, n));
+}
+
+fn fd_scale(v: Num, k: Int) -> Num {
+    return fd_point(v.ip + v.fp, chars_len(v.ip) + k);
+}
+
+// The exact product of two positive digit runs. The point goes back the two
+// widths summed, which is the same construction flt_mul uses, and nothing here
+// rounds, so the residual taken with it is the true one.
+fn fd_prod(a: Num, b: Num) -> Num {
+    let run: String = dd_mul(a.ip + a.fp, b.ip + b.fp);
+    return point_back(run, chars_len(a.fp) + chars_len(b.fp));
+}
+
+// The point exactly between two neighbours. Halving is done as times five then
+// one place across, which is exact on decimals, so no representability question
+// comes up: a midpoint is a dyadic rational and this is its exact value.
+fn fd_mid(a: Num, b: Num) -> Num {
+    let s: Num = num_add(a, b);
+    let run: String = dd_mul(s.ip + s.fp, "5");
+    return point_back(run, chars_len(s.fp) + 1);
+}
+
+fn fd_hexval(c: String) -> Int {
+    let s: String = "0123456789abcdef";
+    let mut i: Int = 0;
+    while i < 16 { if char_at(s, i) == c { return i; } i = i + 1; }
+    return 0;
+}
+
+fn fd_hexdig(v: Int) -> String {
+    return char_at("0123456789abcdef", v);
+}
+
+// The next and the previous double, by moving the word along by one. For every
+// non-negative double except zero and the largest, the word read as a whole
+// number rises with the value, so one more is the next one down the line and one
+// less is the one before. Both callers already turn the two ends away.
+fn fd_hex_inc(h: String) -> String {
+    let mut i: Int = 15;
+    let mut out: String = h;
+    while i >= 0 {
+        let v: Int = fd_hexval(char_at(out, i));
+        if v < 15 { return str_slice(out, 0, i) + fd_hexdig(v + 1) + fd_zeros(15 - i); }
+        out = str_slice(out, 0, i) + "0";
+        i = i - 1;
+    }
+    return "1" + out;
+}
+
+fn fd_hex_dec(h: String) -> String {
+    let mut i: Int = 15;
+    let mut out: String = h;
+    while i >= 0 {
+        let v: Int = fd_hexval(char_at(out, i));
+        if v > 0 { return str_slice(out, 0, i) + fd_hexdig(v - 1) + fd_fs(15 - i); }
+        out = str_slice(out, 0, i) + "f";
+        i = i - 1;
+    }
+    return out;
+}
+
+// A significand is even when its last bit is zero, which is the last hex digit
+// read even. This is what a tie rounds to.
+fn fd_even(h: String) -> Bool {
+    return fd_hexval(char_at(h, 15)) % 2 == 0;
+}
+
+fn fd_sign(h: String, neg: Bool) -> String {
+    if !neg { return h; }
+    return fd_hexdig(fd_hexval(char_at(h, 0)) + 8) + str_slice(h, 1, 16);
+}
+
+// The whole of it. Either side being a double takes both through here, because
+// an int in a float expression is converted exactly and then the operation runs
+// in binary64, which is what jq does and what the hardware does.
+//
+// The quotient is built in two passes and rounded once. Seventeen digits of each
+// operand long-divided give seventeen of the quotient, which is one place short
+// of the seventeen a double is pinned by, so the answer would be off by one on a
+// near tie. The exact residual closes that: the seventeen digits are scaled back
+// into the operands' units, the true quotient less them is taken exactly with
+// dd_mul, and dividing THAT by the divisor gives the next places. Thirty-three
+// digits is a thousand times past what the rounding can notice, and it leaves
+// nothing resting on a tie being unlikely to happen.
+//
+// The last step is the part that makes it a proof rather than a very good guess.
+// Rounding the thirty-three digits gives a candidate, and a candidate can be one
+// out when the true quotient sits on a midpoint. So the two midpoints that
+// border the candidate are built exactly, multiplied by the divisor exactly, and
+// compared with the dividend exactly, and the candidate is kept only if it holds
+// on both sides. Every answer this page gives is one a comparison confirmed, and
+// not one a number of digits bet on.
+pub fn flt_div(a: String, b: String) -> Result[String, String] {
+    let wa: Word = word_read(a);
+    let wb: Word = word_read(b);
+    // The sign comes off the words, not off a comparison: -0.0 is not less than
+    // zero, so a comparison would lose the sign of a negative zero dividend, and
+    // jq keeps it, writing -0 for -0 over 3.
+    let neg: Bool = wa.neg != wb.neg;
+    let xa: Num = word_num(a);
+    let x: Num = Num { neg: false, ip: xa.ip, fp: xa.fp };
+    let yb: Num = word_num(b);
+    let y: Num = Num { neg: false, ip: yb.ip, fp: yb.fp };
+    if num_is_zero(y) { return Err("float division over a zero divisor"); }
+    if num_is_zero(x) { return Ok(fd_sign("0000000000000000", neg)); }
+    let na: NM = fd_norm(x);
+    let nb: NM = fd_norm(y);
+    let my: Int = parse_int_digits(nb.m);
+    let q1: Num = fd_scale(point_back(fd_ldig(parse_int_digits(na.m), my, 17), 17), na.p - nb.p);
+    let r: Num = num_sub(x, fd_prod(y, q1));
+    let mut qhat: Num = q1;
+    if !num_is_zero(r) {
+        let ra: Num = Num { neg: false, ip: r.ip, fp: r.fp };
+        let nr: NM = fd_norm(ra);
+        let c2: Num = fd_scale(point_back(fd_ldig(parse_int_digits(nr.m), my, 18), 18), nr.p - nb.p);
+        qhat = num_add(q1, Num { neg: r.neg, ip: c2.ip, fp: c2.fp });
+    }
+    if underflows_to_zero(qhat) { return Ok(fd_sign("0000000000000000", neg)); }
+    match decimal_bits(num_text(qhat)) {
+        Err(e) => { return Err(e); }
+        Ok(d0) => {
+            if d0 == "7fefffffffffffff" { return Ok(fd_sign("7fefffffffffffff", neg)); }
+            if d0 == "0000000000000000" { return Ok(fd_sign("0000000000000000", neg)); }
+            let lo: Num = fd_mid(word_num(fd_hex_dec(d0)), word_num(d0));
+            let hi: Num = fd_mid(word_num(d0), word_num(fd_hex_inc(d0)));
+            let below: Int = num_cmp(x, fd_prod(y, lo));
+            let above: Int = num_cmp(x, fd_prod(y, hi));
+            if below < 0 { return Ok(fd_sign(fd_hex_dec(d0), neg)); }
+            if above > 0 { return Ok(fd_sign(fd_hex_inc(d0), neg)); }
+            if below == 0 {
+                if fd_even(d0) { return Ok(fd_sign(d0, neg)); }
+                return Ok(fd_sign(fd_hex_dec(d0), neg));
+            }
+            if above == 0 {
+                if fd_even(d0) { return Ok(fd_sign(d0, neg)); }
+                return Ok(fd_sign(fd_hex_inc(d0), neg));
+            }
+            return Ok(fd_sign(d0, neg));
+        }
+    }
+}

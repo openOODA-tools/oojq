@@ -1,0 +1,122 @@
+// # Base64 Formats
+//
+// Logline: Answers @base64 and @base64d, the one pair of jq formats that turns text into bytes and back again.
+//
+// Setup: Pure, no capability needed. Encoding reuses the std RFC 4648 table. Decoding follows jq's own bit accumulator rather than the std decoder, because the two disagree on padding and on the URL-safe alphabet, and jq is the one being matched.
+//
+// Beats:
+//   1. @base64 encodes the UTF-8 bytes of the text, and takes any value at all, because every @format is tostring first.
+//   2. @base64d is six bits in and whole bytes out, with '=' ending the run instead of filling a group.
+//   3. Bytes that do not spell UTF-8 are replaced one replacement character at a time, which is what jq writes.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "render/render_value.oo";
+import "render/render_string.oo";
+import "std/core/encoding/base64.oo";
+
+pub fn format_base64(doc: JDoc, idx: Int) -> SRes {
+    return str_result(doc, base64_encode(render_as_text(doc, idx)));
+}
+
+// jq names the string it was given, the same way it names a value anywhere else
+// in a message: written out, so a quote inside it comes back escaped.
+fn named(text: String, tail: String) -> String {
+    return "string (\"" + render_string(text) + "\") " + tail;
+}
+
+// jq's @base64d is a bit accumulator rather than a four character block reader,
+// and that is the whole of its shape. Six bits go in; whenever eight or more
+// are waiting a whole byte is taken off the top; six bits left at the end is one
+// character too few to spell a byte and is refused. Everything else about the
+// padding falls out of where the loop stops: '=' ends the run wherever it sits,
+// so "ab" decodes to one byte with no '=' written at all, "YQ===" decodes to "a"
+// with the extra '=' ignored, and "A===" is a trailing byte rather than a bad
+// pad. A character outside the standard alphabet ends nothing, it is refused,
+// which is why the URL-safe "-_" spellings jq rejects are rejected here too.
+// What the accumulator has to be divided by to leave exactly the bits that are
+// still waiting. Six go in at a time and eight come off, so the wait is always
+// even and never above six, and a four way choice covers every state it reaches.
+fn shift_of(bits: Int) -> Int {
+    if bits == 0 { return 1; }
+    if bits == 2 { return 4; }
+    if bits == 4 { return 16; }
+    return 64;
+}
+
+fn b64_bits(text: String) -> Result[List[Int], String] {
+    let n: Int = chars_len(text);
+    let mut out: List[Int] = bytes_new();
+    let mut acc: Int = 0;
+    let mut bits: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(text, i);
+        if ch == "=" { break; }
+        let v: Int = b64_six_bits(ch);
+        if v < 0 { return Err(named(text, "is not valid base64 data")); }
+        acc = acc * 64 + v;
+        bits = bits + 6;
+        if bits >= 8 {
+            bits = bits - 8;
+            let d: Int = shift_of(bits);
+            out = bytes_push(out, (acc / d) % 256);
+            acc = acc % d;
+        }
+        i = i + 1;
+    }
+    if bits == 6 { return Err(named(text, "trailing base64 byte found")); }
+    return Ok(out);
+}
+
+// The six bits each of the 64 characters carries, and nothing else. A second
+// alphabet would be the URL-safe one, which jq does not accept here.
+fn b64_six_bits(ch: String) -> Int {
+    if chars_len(ch) != 1 { return 0 - 1; }
+    let b: Int = byte_at(ch, 0) & 255;
+    if b >= 65 && b <= 90 { return b - 65; }
+    if b >= 97 && b <= 122 { return b - 71; }
+    if b >= 48 && b <= 57 { return b + 4; }
+    if b == 43 { return 62; }
+    if b == 47 { return 63; }
+    return 0 - 1;
+}
+
+// Bytes that do not spell UTF-8 cannot go in a string, and a string is the only
+// thing this tree holds. Rather than refuse the whole decode or hand back a
+// broken one, the bad lead byte becomes U+FFFD and the walk moves on by one, so
+// the number of replacements is the number of bytes that could not start a
+// character. That is the rule jq applies, and "/+8=" answers two of them.
+fn clean_utf8(raw: List[Int]) -> List[Int] {
+    let mut out: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < list_len(raw) {
+        let w: Int = utf8_seq_len(raw, i);
+        if w < 1 {
+            out = bytes_push(out, 239);
+            out = bytes_push(out, 191);
+            out = bytes_push(out, 189);
+            i = i + 1;
+        } else {
+            let mut k: Int = 0;
+            while k < w {
+                out = bytes_push(out, list_get(raw, i + k));
+                k = k + 1;
+            }
+            i = i + w;
+        }
+    }
+    return out;
+}
+
+pub fn format_base64d(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let text: String = render_as_text(doc, idx);
+    let got: Result[List[Int], String] = b64_bits(text);
+    match got {
+        Err(why) => { return Err(why); }
+        Ok(raw) => {
+            let made: SRes = str_result(doc, bytes_to_str(clean_utf8(raw)));
+            return Ok(made);
+        }
+    }
+}

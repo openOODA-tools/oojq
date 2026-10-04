@@ -1,0 +1,59 @@
+// # Byte Buffer From Text
+//
+// Logline: Converts JSON text into the integer buffer the std parser consumes.
+//
+// Setup: Pure, no capability needed. oodar exports oo_bytes_from_str but the emitter has no binding for it, so the buffer is built one byte at a time.
+//
+// Beats:
+//   1. Build a List[Int] holding one entry per source byte, masked to 0..255.
+//   2. Preserve byte order exactly so parser offsets index this buffer directly.
+
+pub fn buffer_from_text(src: String) -> List[Int] {
+    let n: Int = chars_len(src);
+    let mut buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < n {
+        buf = bytes_push(buf, byte_at(src, i));
+        i = i + 1;
+    }
+    return buf;
+}
+
+pub fn buffer_byte_at(buf: List[Int], i: Int) -> Int {
+    if i < 0 { return 0 - 1; }
+    if i >= list_len(buf) { return 0 - 1; }
+    return list_get(buf, i) & 255;
+}
+
+pub fn buffer_len(buf: List[Int]) -> Int {
+    return list_len(buf);
+}
+
+// A one line view of a byte range, for error messages that must point at the
+// offending token. Only printable ASCII is echoed; anything else becomes a dot
+// so a control byte can never rewrite the shape of the diagnostic.
+pub fn buffer_preview(buf: List[Int], start: Int, end: Int) -> String {
+    let mut out: String = "";
+    let mut i: Int = start;
+    let mut count: Int = 0;
+    while i < end && count < 12 {
+        let b: Int = buffer_byte_at(buf, i);
+        if b >= 32 && b < 127 {
+            out = out + char_at_printable(b);
+        } else {
+            out = out + ".";
+        }
+        i = i + 1;
+        count = count + 1;
+    }
+    return out;
+}
+
+fn char_at_printable(b: Int) -> String {
+    let alphabet: String = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+    let idx: Int = b - 32;
+    if idx < 0 || idx >= chars_len(alphabet) {
+        return ".";
+    }
+    return char_at(alphabet, idx);
+}

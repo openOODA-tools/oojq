@@ -1,0 +1,16 @@
+// # Filter Parser Anchor
+//
+// Logline: Re-exports the five pages that turn filter text into a node tree.
+//
+// Setup: Pure, no capability needed. The grammar runs from the scanner outwards: a cursor, a span finder, the primary forms, the operators, and the joining levels.
+// Beats:
+//   1. Scan a string, a number, a name, or nothing off the front of the text.
+//   2. Find where a bracketed body ends without parsing what is inside it.
+//   3. Fold the operators from the tightest binding outward.
+//   4. Join them at the top: and, or, comma, the alternative, and the pipe.
+
+import "syntax/parse_top.oo";
+
+pub fn syntax_anchor_status() -> String {
+    return "syntax: scanning, spans, primaries, operators, and the joining levels";
+}

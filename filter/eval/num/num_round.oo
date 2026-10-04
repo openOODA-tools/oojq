@@ -1,0 +1,101 @@
+// # Rounding A Decimal And Taking Its Root
+//
+// Logline: Truncates, rounds, and takes the exact root of a number, refusing every case it cannot name exactly.
+//
+// Setup: Pure, no capability needed. Rounding is a whole step away from the truncated form, so none of it needs a Float to exist.
+// Beats:
+//   1. Round half up, and floor and ceil by moving one whole step.
+//   2. Take the whole root by Newton, then refuse anything that is not a square.
+//   3. Refuse by name rather than print a root that was rounded.
+
+import "filter/eval/num_read.oo";
+import "filter/eval/num/num_add.oo";
+import "std/core/primitives/str.oo";
+
+// The integer part, with the fraction thrown away, which is what an integer
+// cast of a decimal would give without the cast.
+pub fn num_trunc(v: Num) -> Num {
+    return num_norm(v.neg, v.ip, "");
+}
+
+// Adding one to the truncated form, not to the original, is what makes a
+// half round up rather than up by a whole step.
+fn bump(v: Num) -> Num {
+    return num_add(num_trunc(v), num_norm(v.neg, "1", ""));
+}
+
+pub fn num_round_half_up(v: Num) -> Num {
+    if chars_len(v.fp) == 0 { return v; }
+    if digit_at(v.fp, 0) >= 5 { return bump(v); }
+    return num_trunc(v);
+}
+
+pub fn num_floor(v: Num) -> Num {
+    if chars_len(v.fp) == 0 { return v; }
+    if v.neg {
+        let step: Num = num_add(num_trunc(v), num_norm(true, "1", ""));
+        return step;
+    }
+    return num_trunc(v);
+}
+
+pub fn num_ceil(v: Num) -> Num {
+    if chars_len(v.fp) == 0 { return v; }
+    if v.neg { return num_trunc(v); }
+    return bump(v);
+}
+
+// The whole root by Newton's step, which closes most of the gap every round and
+// so needs a handful of rounds even for a number near the top of the range. It
+// is only ever asked about a value this page has already bounded, and every
+// value it handles is positive, so no division here can be by zero.
+fn int_sqrt(n: Int) -> Int {
+    if n < 2 { return n; }
+    let mut x: Int = n;
+    let mut y: Int = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    return x;
+}
+
+// A root this page can state exactly, or a refusal that says why it cannot.
+//
+// The value is read as one whole N over ten to the f, which is what makes 0.25
+// twenty-five over a hundred rather than nothing over a hundred. A factor of
+// ten then moves out of the denominator for as long as the numerator has one
+// to give, and what is left has to be a whole square under a whole power of
+// ten. That is the whole of it: a square has an even count of decimal places
+// in its root, and every other case is a root this page will not name.
+//
+// jq answers every one of those by printing the shortest text that names the
+// double it rounded to, which is a different thing from the exact root, and
+// producing it would need the double itself. A rounded root printed as though
+// it were exact is the wrong answer, so the rest is refused by name.
+pub fn num_sqrt(v: Num) -> Result[Num, String] {
+    // The fraction is measured before it is read, because joining the two parts
+    // moves both of them and a second read of either would find nothing there.
+    let places: Int = chars_len(v.fp);
+    let mut digits: String = v.ip + v.fp;
+    let mut f: Int = places;
+    if chars_len(digits) > 18 {
+        return Err("\"sqrt\" is not answered for a number of more than eighteen digits, because the whole root of it does not fit here");
+    }
+    while f > 0 && char_at(digits, chars_len(digits) - 1) == "0" {
+        digits = str_slice(digits, 0, chars_len(digits) - 1);
+        f = f - 1;
+    }
+    if f % 2 != 0 {
+        return Err("\"sqrt\" has no exact answer here for a value that is not a square, and a rounded root would be a wrong answer");
+    }
+    let n: Int = parse_int_digits(digits);
+    let r: Int = int_sqrt(n);
+    if r * r != n {
+        return Err("\"sqrt\" has no exact answer here for a value that is not a square, and a rounded root would be a wrong answer");
+    }
+    // The root is r over ten to half of f, so the point goes back that many
+    // places from the right and point_back pads r on the left when it needs to.
+    let k: Int = f / 2;
+    return Ok(point_back(r.to_string(), k));
+}

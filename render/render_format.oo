@@ -1,0 +1,82 @@
+// # jq Format Builtins
+//
+// Logline: Renders a value as the text jq writes for @json, @html, and @uri.
+//
+// Setup: Pure, no capability needed. @json reuses the one renderer the CLI prints with, so the two can never disagree about a value.
+// Beats:
+//   1. @json is that renderer asked for its compact form.
+//   2. @html and @uri take tostring first, then escape the five markup characters or percent-encode every byte outside the RFC 3986 unreserved set.
+//   3. @uri walks UTF-8 bytes rather than characters, so a multi-byte letter is encoded one byte at a time.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "render/render_value.oo";
+
+pub fn format_json(doc: JDoc, idx: Int) -> SRes {
+    let text: String = render_stream(doc, one(idx), true);
+    return str_result(doc, text);
+}
+
+// Every @format but @json is tostring followed by a transform, so a number and
+// an object are both legal input to @html and @uri. Refusing a non-string would
+// be refusing something jq answers.
+pub fn format_html(doc: JDoc, idx: Int) -> SRes {
+    return str_result(doc, escape_html(render_as_text(doc, idx)));
+}
+
+fn escape_html(text: String) -> String {
+    let n: Int = chars_len(text);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(text, i);
+        if ch == "&" { out = out + "&amp;"; }
+        else if ch == "<" { out = out + "&lt;"; }
+        else if ch == ">" { out = out + "&gt;"; }
+        else if ch == "\"" { out = out + "&quot;"; }
+        else if ch == "'" { out = out + "&apos;"; }
+        else { out = out + ch; }
+        i = i + 1;
+    }
+    return out;
+}
+
+// Unreserved is the set RFC 3986 leaves alone, and every one of them is ASCII,
+// so a character that starts with one of these bytes is already fine whole.
+fn is_unreserved(b: Int) -> Bool {
+    if b >= 65 && b <= 90 { return true; }
+    if b >= 97 && b <= 122 { return true; }
+    if b >= 48 && b <= 57 { return true; }
+    return b == 45 || b == 95 || b == 46 || b == 126;
+}
+
+fn percent_of(b: Int) -> String {
+    let digits: String = "0123456789ABCDEF";
+    return "%" + char_at(digits, b / 16) + char_at(digits, b % 16);
+}
+
+fn percent_text(text: String) -> String {
+    let n: Int = chars_len(text);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(text, i);
+        let b0: Int = byte_at(ch, 0) & 255;
+        if is_unreserved(b0) {
+            out = out + ch;
+        } else {
+            let w: Int = utf8_width(b0);
+            let mut k: Int = 0;
+            while k < w {
+                out = out + percent_of(byte_at(ch, k) & 255);
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn format_uri(doc: JDoc, idx: Int) -> SRes {
+    return str_result(doc, percent_text(render_as_text(doc, idx)));
+}

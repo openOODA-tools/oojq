@@ -1,0 +1,48 @@
+// # Read A JSON Source
+//
+// Logline: Loads the JSON text oojq will parse, from a named file or stdin.
+//
+// Setup: Holds FsReadCap and nothing more. Reads only, never writes, and never spawns a process.
+//
+// Beats:
+//   1. Read a named file whole, under FsReadCap.
+//   2. Read stdin when no path is given, so oojq composes in a pipe.
+
+import "std/fs/file/file_reader.oo";
+
+// oo_read_stdin, the plain reader, is exported by liboodar.a but the emitter
+// produces an undefined symbol for it. The chunked reader links and is what
+// mcp/engine/core/mcp_stdio.oo already uses, so oojq uses that instead.
+// One idle millisecond budget bounds how long a still-open pipe is waited on.
+// A chunk returns as soon as bytes arrive, so a live producer is never cut off;
+// only a pause longer than the budget is read as end of input.
+pub fn stdin_idle_ms() -> Int {
+    return 1000;
+}
+
+pub fn read_stdin_all(fs: &FsReadCap) -> String {
+    let mut out: String = "";
+    let mut alive: Bool = true;
+    while alive {
+        match oo_read_stdin_chunk(fs, stdin_idle_ms()) {
+            Err(e) => { alive = false; }
+            Ok(chunk) => { out = out + chunk; }
+        }
+    }
+    return out;
+}
+
+pub fn read_source(fs: &FsReadCap, path: String) -> Result[String, String] {
+    if chars_len(path) == 0 {
+        return Ok(read_stdin_all(fs));
+    }
+    match file_reader_open(fs, path) {
+        Err(e) => { return Err("cannot open " + path + ": " + e); }
+        Ok(reader) => {
+            match file_reader_read_all(fs, reader) {
+                Err(e) => { return Err("cannot read " + path + ": " + e); }
+                Ok(text) => { return Ok(text); }
+            }
+        }
+    }
+}

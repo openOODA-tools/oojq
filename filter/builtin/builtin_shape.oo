@@ -1,0 +1,173 @@
+// # Value Shape And Kind Filters
+//
+// Logline: Answers the builtins that ask what a value is made of: its keys in the order written, its members of one kind, and a flattened array.
+//
+// Setup: Pure, no capability needed. Every helper appends to the arena it was handed and never reads a field twice.
+// Beats:
+//   1. Read keys, sorted or in source order, minting an array's indexes as numbers.
+//   2. Keep the members of one kind, treating number, scalar, and iterable as the three groups jq names.
+//   3. Flatten to a chosen depth by adding a subarray's contents, which is why an empty array drops out.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "builtin_order.oo";
+import "std/core/primitives/str.oo";
+
+// number, scalar, and iterable are not kinds of their own in the arena, so they
+// are answered here rather than stored on every node.
+fn kind_matches(got: String, want: String) -> Bool {
+    if want == "number" { return got == "int" || got == "float"; }
+    if want == "scalar" { return got != "array" && got != "object"; }
+    if want == "iterable" { return got == "array" || got == "object"; }
+    return got == want;
+}
+
+// jq writes every one of these as a select over the value in hand rather than
+// as a walk over its members, so 1|numbers keeps the 1 and 1|arrays keeps
+// nothing. None of them iterate, and none of them fail on a scalar.
+fn keep_kind(doc: JDoc, idx: Int, want: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if kind_matches(v.kind, want) { return Ok(SRes { doc: doc, out: one(idx) }); }
+    return Ok(SRes { doc: doc, out: list_new() });
+}
+
+pub fn builtin_nulls(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return keep_kind(doc, idx, "null");
+}
+
+pub fn builtin_booleans(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return keep_kind(doc, idx, "bool");
+}
+
+pub fn builtin_numbers(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return keep_kind(doc, idx, "number");
+}
+
+pub fn builtin_strings(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return keep_kind(doc, idx, "string");
+}
+
+pub fn builtin_arrays(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return keep_kind(doc, idx, "array");
+}
+
+pub fn builtin_objects(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return keep_kind(doc, idx, "object");
+}
+
+pub fn builtin_iterables(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return keep_kind(doc, idx, "iterable");
+}
+
+pub fn builtin_scalars(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return keep_kind(doc, idx, "scalar");
+}
+
+// values is select(. != null) over the value in hand, not over its members, so
+// it never walks into anything and never fails on a scalar.
+pub fn builtin_values(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "null" { return Ok(SRes { doc: doc, out: list_new() }); }
+    return Ok(SRes { doc: doc, out: one(idx) });
+}
+
+// An array is keyed by its indexes, which are numbers and not text, so these
+// nodes are minted rather than rendered.
+pub fn index_keys(doc: JDoc, kids: List[Int]) -> SRes {
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(kids) {
+        let node: JVal = jval_int(i);
+        let p: PRes = jdoc_push(live, node);
+        live = p.doc;
+        out = list_push(out, p.idx);
+        i = i + 1;
+    }
+    let made: SRes = array_result(live, out);
+    return made;
+}
+
+// An object's keys in the order they were written, as text. Both keys and
+// keys_unsorted read the same list this way and differ only in whether they
+// sort it afterwards.
+fn object_key_texts(v: JVal) -> List[String] {
+    let kids: List[Int] = v.kids;
+    let mut out: List[String] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(kids) {
+        out = list_push(out, list_get(v.keys, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn builtin_keys_unsorted(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "array" {
+        let kids: List[Int] = v.kids;
+        let made: SRes = index_keys(doc, kids);
+        return Ok(made);
+    }
+    if v.kind != "object" {
+        return Err("keys_unsorted needs an array or object, not a " + v.kind);
+    }
+    let kids: List[Int] = v.kids;
+    return Ok(string_array_result(doc, object_key_texts(v)));
+}
+
+// keys is keys_unsorted with the result sorted, and the sort is what makes the
+// two differ for an object. For an array it changes nothing: the indexes are
+// minted in order already, so [10,20,30]|keys is [0,1,2] and never [2,1,0].
+// The nodes are numbers, which is the half that used to be wrong: rendering an
+// index as text made `keys` answer ["0","1"] and `add` on it answer "01".
+pub fn builtin_keys(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "array" {
+        let kids: List[Int] = v.kids;
+        let made: SRes = index_keys(doc, kids);
+        return Ok(made);
+    }
+    if v.kind == "object" {
+        return Ok(string_array_result(doc, sort_strings(object_key_texts(v))));
+    }
+    return Err("keys needs an object or array, not a " + v.kind);
+}
+
+// jq flattens by adding the contents of a subarray rather than the subarray
+// itself, so an empty array contributes nothing instead of an empty group.
+fn flatten_into(doc: JDoc, kids: List[Int], depth: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(kids) {
+        let e: Int = list_get(kids, i);
+        let v: JVal = jval_at(doc, e);
+        if v.kind == "array" && depth > 0 {
+            let inner: List[Int] = flatten_into(doc, v.kids, depth - 1);
+            out = concat_indices(out, inner);
+        } else {
+            out = list_push(out, e);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// Written flat it flattens all the way down, which is what jq spells 1e9 and
+// which no real document ever reaches.
+pub fn builtin_flatten(doc: JDoc, idx: Int, depth_text: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" { return Err("flatten needs an array, not a " + v.kind); }
+    let kids: List[Int] = v.kids;
+    let mut depth: Int = 1000000;
+    if chars_len(depth_text) > 0 {
+        let got: Result[Int, String] = parse_int(depth_text);
+        match got {
+            Err(e) => { return Err("flatten needs a whole number for its depth"); }
+            Ok(d) => { depth = d; }
+        }
+    }
+    let flat: List[Int] = flatten_into(doc, kids, depth);
+    let made: SRes = array_result(doc, flat);
+    return Ok(made);
+}

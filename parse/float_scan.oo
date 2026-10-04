@@ -1,0 +1,149 @@
+// # Number Literal Scan And Shadow Buffer
+//
+// Logline: Finds float literals in a JSON buffer and hides them from the std scanner.
+//
+// Setup: Pure, no capability needed. Hides decimal points from the std scanner without losing byte offsets.
+// Beats:
+//   1. Walk the buffer outside string literals and record every float literal.
+//   2. Build a shadow buffer where each float becomes digits of the same length,
+//      so every offset the std parser reports still points at the same span.
+
+type FSpan = struct {
+    start: Int,
+    end: Int,
+    text: String
+};
+
+type Shadow = struct {
+    buf: List[Int],
+    floats: List[FSpan]
+};
+
+pub fn buf_at(buf: List[Int], i: Int) -> Int {
+    if i < 0 || i >= list_len(buf) { return 0 - 1; }
+    return list_get(buf, i) & 255;
+}
+
+fn is_digit(b: Int) -> Bool {
+    return b >= 48 && b <= 57;
+}
+
+// Scan a JSON number literal at i. Returns the offset just past it, or -1 when
+// i does not begin a number. Follows RFC 8259: optional minus, int part,
+// optional fraction, optional exponent. A trailing dot is not consumed, so
+// malformed input stays malformed rather than being repaired.
+pub fn scan_number(buf: List[Int], i: Int) -> Int {
+    let n: Int = list_len(buf);
+    let mut j: Int = i;
+    if j < n && buf_at(buf, j) == 45 { j = j + 1; }
+    let digits_start: Int = j;
+    while j < n && is_digit(buf_at(buf, j)) { j = j + 1; }
+    if j == digits_start { return 0 - 1; }
+    if j < n && buf_at(buf, j) == 46 {
+        j = j + 1;
+        let frac_start: Int = j;
+        while j < n && is_digit(buf_at(buf, j)) { j = j + 1; }
+        if j == frac_start { return 0 - 1; }
+    }
+    if j < n && (buf_at(buf, j) == 101 || buf_at(buf, j) == 69) {
+        let mut k: Int = j + 1;
+        if k < n && (buf_at(buf, k) == 43 || buf_at(buf, k) == 45) { k = k + 1; }
+        let exp_start: Int = k;
+        while k < n && is_digit(buf_at(buf, k)) { k = k + 1; }
+        if k == exp_start { return 0 - 1; }
+        j = k;
+    }
+    return j;
+}
+
+fn span_is_float(buf: List[Int], start: Int, end: Int) -> Bool {
+    let mut i: Int = start;
+    while i < end {
+        let b: Int = buf_at(buf, i);
+        if b == 46 || b == 101 || b == 69 { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn slice_text(buf: List[Int], start: Int, end: Int) -> String {
+    let mut out: String = "";
+    let mut i: Int = start;
+    while i < end {
+        out = out + char_at(printable(), buf_at(buf, i) - 32);
+        i = i + 1;
+    }
+    return out;
+}
+
+fn printable() -> String {
+    return " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+}
+
+// One pass produces both the shadow buffer and the float table. Doing it in a
+// single walk avoids handing buf to a helper and then reading it again.
+pub fn build_shadow(buf: List[Int]) -> Shadow {
+    let n: Int = list_len(buf);
+    let mut out: List[Int] = list_new();
+    let mut spans: List[FSpan] = list_new();
+    let mut i: Int = 0;
+    let mut in_str: Bool = false;
+    while i < n {
+        let b: Int = buf_at(buf, i);
+        if in_str {
+            out = list_push(out, b);
+            if b == 92 && i + 1 < n {
+                out = list_push(out, buf_at(buf, i + 1));
+                i = i + 2;
+                continue;
+            }
+            if b == 34 { in_str = false; }
+            i = i + 1;
+            continue;
+        }
+        if b == 34 {
+            in_str = true;
+            out = list_push(out, b);
+            i = i + 1;
+            continue;
+        }
+        let is_start: Bool = is_digit(b) || (b == 45 && i + 1 < n && is_digit(buf_at(buf, i + 1)));
+        if !is_start {
+            out = list_push(out, b);
+            i = i + 1;
+            continue;
+        }
+        let end: Int = scan_number(buf, i);
+        if end < 0 {
+            out = list_push(out, b);
+            i = i + 1;
+            continue;
+        }
+        if span_is_float(buf, i, end) {
+            spans = list_push(spans, FSpan { start: i, end: end, text: slice_text(buf, i, end) });
+            let mut j: Int = i;
+            while j < end {
+                out = list_push(out, 57);
+                j = j + 1;
+            }
+        } else {
+            let mut j: Int = i;
+            while j < end {
+                out = list_push(out, buf_at(buf, j));
+                j = j + 1;
+            }
+        }
+        i = end;
+    }
+    return Shadow { buf: out, floats: spans };
+}
+
+pub fn find_float(spans: List[FSpan], start: Int) -> String {
+    let mut i: Int = 0;
+    while i < list_len(spans) {
+        let sp: FSpan = list_get(spans, i);
+        if sp.start == start { return sp.text; }
+        i = i + 1;
+    }
+    return "";
+}

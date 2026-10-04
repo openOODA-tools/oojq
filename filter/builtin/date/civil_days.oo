@@ -1,0 +1,94 @@
+// # Days And Civil Dates
+//
+// Logline: Converts a count of days since 1970-01-01 to a calendar date and back, which is the arithmetic every UTC date builtin is made of.
+//
+// Setup: Pure, no capability needed. The whole of it is one era-based formula run forwards and backwards; nothing here reads a clock, a calendar file, or a timezone.
+// Beats:
+//   1. Days since the epoch to a year, month, and day, for any date before or after 1970.
+//   2. The same turned around, for mktime.
+//   3. The weekday and the day of the year, both zero based the way jq numbers them.
+
+type Civ = struct {
+    y: Int,
+    m: Int,
+    d: Int
+};
+
+fn cd_floor_div(a: Int, b: Int) -> Int {
+    let mut q: Int = a / b;
+    let r: Int = a % b;
+    if r != 0 {
+        if (r < 0) != (b < 0) { q = q - 1; }
+    }
+    return q;
+}
+
+// The era is a whole number of 400-year blocks, so it is a floor division and
+// goes through cd_floor_div rather than a bare `/`. Whether this language's `/`
+// floors or truncates toward zero, cd_floor_div answers the same, and the era
+// is the one place in the formula where the two differ: a bare `/` that
+// truncates gives -1 for the year -1 and a bare `/` that floors gives 0 for
+// some neighbours, and the two answers are a whole era apart, which is 146097
+// days. Everything else here divides a value that is already non-negative, so
+// the two conventions agree on it.
+fn cd_days_from_civil(y: Int, m: Int, d: Int) -> Int {
+    let mut yy: Int = y;
+    if m <= 2 { yy = yy - 1; }
+    let era: Int = cd_floor_div(yy, 400);
+    let yoe: Int = yy - era * 400;
+    let mut mm: Int = m - 3;
+    if m <= 2 { mm = m + 9; }
+    let doy: Int = (153 * mm + 2) / 5 + d - 1;
+    let doe: Int = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+pub fn civil_days(y: Int, m: Int, d: Int) -> Int {
+    return cd_days_from_civil(y, m, d);
+}
+
+pub fn days_civil(z0: Int) -> Civ {
+    let z: Int = z0 + 719468;
+    let era: Int = cd_floor_div(z, 146097);
+    let doe: Int = z - era * 146097;
+    let yoe: Int = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y: Int = yoe + era * 400;
+    let doy: Int = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp: Int = (5 * doy + 2) / 153;
+    let d: Int = doy - (153 * mp + 2) / 5 + 1;
+    let mut m: Int = mp;
+    if mp >= 10 { m = mp - 9; } else { m = mp + 3; }
+    let mut yy: Int = y;
+    if m <= 2 { yy = yy + 1; }
+    return Civ { y: yy, m: m, d: d };
+}
+
+// 1970-01-01 was a Thursday, and jq counts the week from Sunday, so a Thursday
+// is four. The count is taken positive first because a day count before 1970 is
+// negative and a plain remainder of it would be negative too.
+pub fn day_weekday(days: Int) -> Int {
+    let mut r: Int = days % 7;
+    if r < 0 { r = r + 7; }
+    return (r + 4) % 7;
+}
+
+// Zero based, so 1 January is zero and 31 December in an ordinary year is 364.
+pub fn day_yday(y: Int, days: Int) -> Int {
+    return days - cd_days_from_civil(y, 1, 1);
+}
+
+// Split a whole number of seconds since the epoch into a whole number of days
+// and the seconds left inside that day. A day count is taken toward negative
+// infinity, so one second before the epoch is the day before at the end of it,
+// not the epoch day at minus one second, and that is the difference between
+// 1969-12-31 and 1970-01-01 in every answer below.
+type Split = struct {
+    days: Int,
+    sod: Int
+};
+
+pub fn split_day(t: Int) -> Split {
+    let mut days: Int = cd_floor_div(t, 86400);
+    let sod: Int = t - days * 86400;
+    return Split { days: days, sod: sod };
+}

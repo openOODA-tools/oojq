@@ -1,0 +1,129 @@
+// # Reading A Literal Path Expression
+//
+// Logline: Turns a filter that is only a path into the steps that path names, and refuses anything that is more than a path.
+//
+// Setup: Pure, no capability needed. It reads filter text with the same scanner the parser uses and reads no value at all, so a path here is a shape and not an answer.
+// Beats:
+//   1. Read .name, ."quoted name", and [0] as the three forms one step is written in.
+//   2. Split a comma-separated argument into the separate paths it names.
+//   3. Refuse a pipe, an iterate, a slice, or recursion rather than read part of it as a path.
+
+import "syntax/scan/parse_lit.oo";
+import "syntax/scan/parse_span.oo";
+
+// One step read, carrying where the next one starts. The step itself is kept as
+// the text that names it with a letter in front: "s:port" is a member name and
+// "i:-1" is a position. The letter is read back where the path is built, so
+// nothing on this page has to know how a step is stored or how a path is made.
+type Step = struct {
+    body: String,
+    next: Int
+};
+
+// Refusing is the whole of the safety here. A filter that is more than a path
+// is a different question, and reading the part of it that looks like one would
+// answer about a path the writer never wrote.
+fn not_a_path() -> String {
+    return "\"path\" and \"del\" read a literal path in this build, and a step with a pipe, an iterate, a slice, or recursion is not one";
+}
+
+// [0] and .["a b"] are the two bracketed forms. A position has to be a whole
+// number, because a path is stored as JSON and a fractional key is not one jq
+// writes; anything else inside the brackets is refused rather than guessed at.
+fn bracket_step(c: Cur) -> Result[Step, String] {
+    let g: Result[Tok, String] = scan_group(c);
+    match g {
+        Err(e) => { return Err(not_a_path()); }
+        Ok(k) => {
+            let inner: String = trim_ws(k.text);
+            if chars_len(inner) == 0 { return Err(not_a_path()); }
+            let probe: Cur = Cur { src: inner, pos: 0 };
+            if cur_has(probe, "\"") {
+                let s: Result[Tok, String] = scan_string(probe);
+                match s {
+                    Err(e) => { return Err(not_a_path()); }
+                    Ok(q) => {
+                        let made: Step = Step { body: "s:" + q.text, next: k.pos };
+                        return Ok(made);
+                    }
+                }
+            }
+            let v: Result[Int, String] = parse_int(inner);
+            match v {
+                Err(e) => { return Err("a path position must be a whole number"); }
+                Ok(i) => {
+                    let made: Step = Step { body: "i:" + i.to_string(), next: k.pos };
+                    return Ok(made);
+                }
+            }
+        }
+    }
+}
+
+// The steps of one path, in the order they are written. Nothing else in the
+// text is accepted: a comma would have been split off already, and a pipe, a
+// question mark, a brace, or an operator is a different filter.
+pub fn literal_path(text: String) -> Result[List[String], String] {
+    let t: String = trim_ws(text);
+    let n: Int = chars_len(t);
+    let mut parts: List[String] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let c: Cur = Cur { src: t, pos: i };
+        if cur_has(c, "..") { return Err(not_a_path()); }
+        if cur_at(c) == "[" {
+            let st: Result[Step, String] = bracket_step(c);
+            match st {
+                Err(e) => { return Err(e); }
+                Ok(s) => {
+                    parts = list_push(parts, s.body);
+                    i = s.next;
+                }
+            }
+        } else if cur_at(c) == "." {
+            let after: Cur = cur_step(c, 1);
+            // A dot with nothing after it is the value itself, so the path has
+            // no steps. That is what makes path(.) an empty array and del(.)
+            // null, which are both what jq answers.
+            if cur_end(after) { i = n; }
+            else if cur_at(after) == "[" {
+                let st: Result[Step, String] = bracket_step(after);
+                match st {
+                    Err(e) => { return Err(e); }
+                    Ok(s) => {
+                        parts = list_push(parts, s.body);
+                        i = s.next;
+                    }
+                }
+            } else if cur_has(after, "\"") {
+                let g: Result[Tok, String] = scan_string(after);
+                match g {
+                    Err(e) => { return Err(not_a_path()); }
+                    Ok(q) => {
+                        parts = list_push(parts, "s:" + q.text);
+                        i = q.pos;
+                    }
+                }
+            } else {
+                let g: Result[Tok, String] = scan_ident(after);
+                match g {
+                    Err(e) => { return Err(not_a_path()); }
+                    Ok(q) => {
+                        parts = list_push(parts, "s:" + q.text);
+                        i = q.pos;
+                    }
+                }
+            }
+        } else {
+            return Err(not_a_path());
+        }
+    }
+    return Ok(parts);
+}
+
+// A comma at the top level separates whole paths rather than steps, so
+// .a,.b names two and .a[0,1] names one that is not a path at all. The caller
+// splits with split_top_commas and reads each piece with literal_path, because
+// a list of lists of strings does not survive the backend: it is built as a
+// list of lists of the wrong element type and the LLVM pass rejects it. A list
+// of lists of numbers is fine, which is what makes this worth writing down.

@@ -1,0 +1,19 @@
+// # Filter Subsystem Anchor - Filter Text To Value Stream
+//
+// Logline: Parses a jq-style filter into a node tree and runs it over a value stream.
+//
+// Setup: Pure, so a filter can be tested against a literal tree with no harness. Takes values, returns values, and never renders text.
+//
+// Beats:
+//   1. Parse filter text into a node tree, refusing unknown syntax by name.
+//   2. Run that tree once per value, so multiple outputs stay natural.
+//
+// The grammar covers paths, indexing, slicing, iteration, recursion, literals,
+// arithmetic, comparison, and/or, the alternative operator, the question mark,
+// if/then/else, array construction, and the builtins that take a filter.
+
+import "filter_eval.oo";
+
+pub fn filter_anchor_status() -> String {
+    return "filter: paths, operators, conditionals, and the filter builtins";
+}

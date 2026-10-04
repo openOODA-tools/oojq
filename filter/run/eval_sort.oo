@@ -1,0 +1,243 @@
+// # Ordering And Grouping A List Of Values
+//
+// Logline: Sorts node indices by a key, and cuts the sorted run into groups that share one.
+//
+// Setup: Pure, no capability needed. The key is already a node index by the time it arrives, so this page never parses or evaluates anything itself.
+// Beats:
+//   1. Keep an element and its key side by side while a list is being built.
+//   2. Insertion sort by key, sliding the entry down and shifting the run above it.
+//   3. Walk the sorted run and start a new group here every change of key, and answer sort and unique over whole values.
+
+import "filter/select_node.oo";
+import "filter/eval/eval_cmp.oo";
+import "render/render_value.oo";
+
+// A key sits beside the element it came from, because sorting one without the
+// other would lose the pairing the moment the list moved.
+type GSort = struct {
+    idx: List[Int],
+    keys: List[Int]
+};
+
+pub fn gs_new() -> GSort {
+    return GSort { idx: list_new(), keys: list_new() };
+}
+
+pub fn gs_push(g: GSort, e: Int, k: Int) -> GSort {
+    return GSort { idx: list_push(g.idx, e), keys: list_push(g.keys, k) };
+}
+
+pub fn gs_len(g: GSort) -> Int {
+    return list_len(g.idx);
+}
+
+fn slot(g: GSort, here: Int) -> Int {
+    return list_get(g.idx, here);
+}
+
+fn key_at(g: GSort, here: Int) -> Int {
+    return list_get(g.keys, here);
+}
+
+// The entry at from slides down to to and every entry between them shifts up
+// one place, which is what an insertion sort needs. Lifting the entry out and
+// dropping it back would close the gap instead, leaving the run shorter.
+pub fn move_left(g: GSort, to: Int, from: Int, e: Int, k: Int) -> GSort {
+    let mut idx: List[Int] = list_new();
+    let mut keys: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < gs_len(g) {
+        if i == to {
+            idx = list_push(idx, e);
+            keys = list_push(keys, k);
+        } else {
+            if i > to && i <= from {
+                idx = list_push(idx, slot(g, i - 1));
+                keys = list_push(keys, key_at(g, i - 1));
+            } else {
+                idx = list_push(idx, slot(g, i));
+                keys = list_push(keys, key_at(g, i));
+            }
+        }
+        i = i + 1;
+    }
+    return GSort { idx: idx, keys: keys };
+}
+
+// Earlier wins a tie, so the sort is stable and a repeated key keeps the order
+// it arrived in, which is the order jq prints.
+pub fn gs_sorted(doc: JDoc, g: GSort) -> GSort {
+    let mut sorted: GSort = g;
+    let mut i: Int = 1;
+    while i < gs_len(sorted) {
+        let e: Int = slot(sorted, i);
+        let k: Int = key_at(sorted, i);
+        let mut j: Int = i;
+        let mut on: Bool = true;
+        while on && j > 0 {
+            let pe: Int = slot(sorted, j - 1);
+            let pk: Int = key_at(sorted, j - 1);
+            let c: Int = compare_values(doc, pk, k);
+            let ahead: Bool = c > 0 || (c == 0 && compare_values(doc, pe, e) > 0);
+            if ahead {
+                j = j - 1;
+            } else {
+                on = false;
+            }
+        }
+        sorted = move_left(sorted, j, i, e, k);
+        i = i + 1;
+    }
+    return sorted;
+}
+
+// A run whose key is the element itself is sorted by value, which is what a
+// plain sort and a plain unique both want.
+pub fn by_value(doc: JDoc, kids: List[Int]) -> GSort {
+    let mut g: GSort = gs_new();
+    let mut i: Int = 0;
+    while i < list_len(kids) {
+        let e: Int = list_get(kids, i);
+        g = gs_push(g, e, e);
+        i = i + 1;
+    }
+    return gs_sorted(doc, g);
+}
+
+// A body that answers nothing groups under the member itself, which keeps one
+// key per member and stops the grouping from losing a member.
+pub fn head_or(e: Int, z: SRes) -> Int {
+    if list_len(z.out) == 0 { return e; }
+    return list_get(z.out, 0);
+}
+
+// Each group is the list of elements in it, which group_by turns into one
+// array and sort_by simply never asks for.
+pub fn group_runs(doc: JDoc, g: GSort) -> List[List[Int]] {
+    let mut batches: List[List[Int]] = list_new();
+    let mut group: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < gs_len(g) {
+        if i > 0 {
+            let a: Int = key_at(g, i - 1);
+            let b: Int = key_at(g, i);
+            if compare_values(doc, a, b) != 0 {
+                batches = list_push(batches, group);
+                group = list_new();
+            }
+        }
+        group = list_push(group, slot(g, i));
+        i = i + 1;
+    }
+    if list_len(group) > 0 { batches = list_push(batches, group); }
+    return batches;
+}
+
+fn sort_one(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" {
+        return Err("sort needs an array, not a " + v.kind);
+    }
+    let kids: List[Int] = v.kids;
+    let ordered: GSort = by_value(doc, kids);
+    let made: SRes = array_result(doc, ordered.idx);
+    return Ok(made);
+}
+
+// sort orders by jq's own value order, so numbers, strings, arrays, and objects
+// all land in the right place. Ordering by code point alone only ever worked
+// for strings and quietly flattened everything else to the empty one.
+pub fn sort_over(doc: JDoc, input: List[Int]) -> Result[SRes, String] {
+    let mut out: List[Int] = list_new();
+    let mut live: JDoc = doc;
+    let mut i: Int = 0;
+    while i < list_len(input) {
+        let here: Int = list_get(input, i);
+        let made: Result[SRes, String] = sort_one(live, here);
+        match made {
+            Err(e) => { return Err(e); }
+            Ok(v) => { live = v.doc; out = concat_indices(out, v.out); }
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+fn unique_one(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" {
+        return Err("unique needs an array, not a " + v.kind);
+    }
+    let kids: List[Int] = v.kids;
+    let ordered: GSort = by_value(doc, kids);
+    let run: List[Int] = ordered.idx;
+    let mut kept: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(run) {
+        let here: Int = list_get(run, i);
+        if list_len(kept) == 0 {
+            kept = list_push(kept, here);
+        } else {
+            let back: Int = list_get(kept, list_len(kept) - 1);
+            if !values_equal(doc, back, here) { kept = list_push(kept, here); }
+        }
+        i = i + 1;
+    }
+    let made: SRes = array_result(doc, kept);
+    return Ok(made);
+}
+
+// unique sorts and then drops adjacent equals, so no separate set is needed and
+// 1 and 1.0 count as the one value jq counts them as.
+pub fn unique_over(doc: JDoc, input: List[Int]) -> Result[SRes, String] {
+    let mut out: List[Int] = list_new();
+    let mut live: JDoc = doc;
+    let mut i: Int = 0;
+    while i < list_len(input) {
+        let here: Int = list_get(input, i);
+        let made: Result[SRes, String] = unique_one(live, here);
+        match made {
+            Err(e) => { return Err(e); }
+            Ok(v) => { live = v.doc; out = concat_indices(out, v.out); }
+        }
+        i = i + 1;
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+// min and max pick one end of the run without sorting it, which is the same walk
+// order the sort uses, so the two agree. They used to read the integer part off
+// each member to decide, which is nothing at all for a decimal: [1.5, 2.5] had
+// two members that both read 0, so max answered 1.5, and ["b","a"] answered "b".
+// A refusal names the value twice, which is what jq does with a one-value run.
+// The two ends are deliberately not mirrors: jq's max takes a later member on a
+// tie and its min keeps the earlier one, so [-0, 0] is 0 and [0, -0] is -0 under
+// max, while min gives -0 and 0. -0 and 0 are the only two JSON values that
+// compare equal and still print differently, so this is the one place it shows.
+fn end_of(doc: JDoc, kids: List[Int], want_max: Bool) -> SRes {
+    if list_len(kids) == 0 { return null_result(doc); }
+    let mut best: Int = list_get(kids, 0);
+    let mut i: Int = 1;
+    while i < list_len(kids) {
+        let c: Int = compare_values(doc, list_get(kids, i), best);
+        if (want_max && c >= 0) || (!want_max && c < 0) { best = list_get(kids, i); }
+        i = i + 1;
+    }
+    return SRes { doc: doc, out: one(best) };
+}
+
+fn end_over(doc: JDoc, idx: Int, want_max: Bool) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind != "array" {
+        return Err(cannot_pair(doc, idx, idx, "iterated") + " over");
+    }
+    return Ok(end_of(doc, v.kids, want_max));
+}
+
+pub fn min_over(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return end_over(doc, idx, false);
+}
+
+pub fn max_over(doc: JDoc, idx: Int) -> Result[SRes, String] {
+    return end_over(doc, idx, true);
+}

@@ -1,0 +1,19 @@
+// # IPC Subsystem Anchor - CLI, MCP Stdio, And AF_UNIX Socket
+//
+// Logline: Presents one filter engine through three surfaces that must agree.
+//
+// Setup: The CLI surface is built and lives in main.oo. MCP stdio is built and lives in the mcp pages. The AF_UNIX socket is not implemented yet; std/net/unix_socket.oo is the substrate it would reuse.
+//
+// Beats:
+//   1. Serve identical semantics over argv and MCP stdio, and over a bound socket when that lands.
+//   2. Refuse a request the CLI would refuse, and say why in the same shape.
+//
+// oogrep already answers MCP over its own stdio surface without registering with
+// the openOODA server, so oojq copies that pattern rather than editing the
+// server's hardcoded tool catalog. The frames are Content-Length delimited, which
+// is what the server in Projects/openOODA/mcp speaks, and a bare JSON value is
+// accepted as well so a client that sends neither header still works.
+
+pub fn ipc_anchor_status() -> String {
+    return "ipc: cli and mcp stdio done; unix socket not yet built";
+}
