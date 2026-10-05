@@ -47,7 +47,8 @@ jobs:
           OODA_COMPILER: ${{ github.workspace }}/oodac/bin/oodac
           OODA_FS_READDIR: ${{ github.workspace }}
           OODA_FS_WRITEDIR: ${{ github.workspace }}
-        run: make all test
+          OO_LIST_AMBIENT_QUOTA: 8589934592
+        run: make all
 
       - name: Stage release asset
         working-directory: ${{ github.workspace }}

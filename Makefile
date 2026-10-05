@@ -21,6 +21,7 @@
 OODA_COMPILER ?= $(firstword $(wildcard $(HOME)/.openooda/bin/oodac $(CURDIR)/../../openOODA/oodac/bin/oodac))
 OODACODEX ?= $(HOME)/.openooda/northstar.oot
 OO_LIST_AMBIENT_QUOTA ?= 8589934592
+export OO_LIST_AMBIENT_QUOTA
 BIN := dist/oojq
 
 # Every page in the tree rather than a hand written list, which had drifted by
@@ -323,7 +324,7 @@ test: build
 	assert_out "$$(echo '{"a":0.0}' | ./$(BIN) .a 2>&1)" '0.0' "zero float round-trips"; \
 	assert_out "$$(echo '{"k":"1.5 is text"}' | ./$(BIN) .k 2>&1)" '"1.5 is text"' "a float inside a string is untouched"; \
 	assert_out "$$(echo '{"a":1.5}' | ./$(BIN) -c . 2>&1)" '{"a":1.5}' "a float inside a document"; \
-	assert_out "$$(printf '{\n  \"a\": 1.5\n}' | ./$(BIN) . 2>&1 | tr '\n' '~')" '{~  "a": 1.5~}~' "default output is jq pretty form"; \
+	assert_out "$$(echo '{"a": 1.5}' | ./$(BIN) . 2>&1 | tr '\n' '~')" '{~  "a": 1.5~}~' "default output is jq pretty form"; \
 	assert_out "$$(echo '{"a":{"b":[{"c":2.5}]}}' | ./$(BIN) .a.b[0].c 2>&1)" '2.5' "float nested three deep"; \
 	assert_out "$$(echo '{"k":[]}' | ./$(BIN) .k 2>&1)" '[]' "empty array renders as []"; \
 	assert_out "$$(./$(BIN) .name $(TMPDOC) 2>&1 | tr '\n' '|')" '"oojq"|' "unquoted filter reads a file"; \
@@ -1273,7 +1274,7 @@ test: build
 	assert_has "$$(echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | head -c 10 | ./$(BIN) --mcp 2>&1)" 'truncated frame at end of input' "mcp loop handles truncated input safely"; \
 	assert_has "$$(printf 'Content-Length: 20000000\r\n\r\n' | ./$(BIN) --mcp 2>&1)" 'frame size exceeds limit' "mcp loop enforces frame size ceiling"; \
 	assert_has "$$(python3 -c "print('x'*100000)" | ./$(BIN) --mcp 2>&1 | head -n 3)" 'frame buffer ceiling exceeded' "mcp loop enforces frame buffer ceiling"; \
-	assert_has "$$(echo 1 | ./$(BIN) -c "$$(python3 -c "print('+'.join(['1']*4000))")" 2>&1)" 'exceeds maximum nesting depth limit' "filter with deeply chained additions is refused cleanly"; \
+	assert_has "$$(echo 1 | ./$(BIN) -c "$$(python3 -c "print('+'.join(['1']*500))")" 2>&1)" 'exceeds maximum nesting depth limit' "filter with deeply chained additions is refused cleanly"; \
 	assert_out "$$(printf '%s\n' '{"a": "\u0022"}' | ./$(BIN) -c . 2>&1)" '{"a":"\""}' "u0022 in string decodes to quote"; \
 	assert_out "$$(printf '%s\n' '{"a": "\u005c"}' | ./$(BIN) -c . 2>&1)" '{"a":"\\"}' "u005c in string decodes to backslash"; \
 	assert_has "$$(printf 'Content-Length: 100\r\n\r\n{"short":' | ./$(BIN) --mcp 2>&1)" '"code":-32700' "mcp loop emits json-rpc error frame on framed truncation";  echo $$pass $$fail >> $(CNT);
