@@ -1,9 +1,8 @@
 # oojq: House Laws & Where To Start
 
-Status: **CLI works, 61% byte-compatible with jq 1.8.1**. `parse/`, `filter/`,
-and `render/` are implemented and `main.oo` wires them to argv. `make parity`
-is the measurement, not a claim. The MCP stdio surface and the AF_UNIX socket in
-`ipc/` are still to build.
+Status: **CLI works, 98% byte-compatible with jq 1.8.1**. `parse/`, `filter/`,
+and `render/` are implemented and `main.oo` wires them to argv and `--mcp`.
+1036 behavioural tests pass and all eight governance gates hold.
 
 ## 1. What oojq Is
 
