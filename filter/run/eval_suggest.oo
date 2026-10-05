@@ -67,9 +67,16 @@ pub fn known_names() -> List[String] {
     n = list_push(n, "objects");
     n = list_push(n, "path");
     n = list_push(n, "paths");
+    // recurse and walk walk a filter themselves, so eval_run dispatches them
+    // there rather than through the hub. They were missing from this list, which
+    // is what the suggest-audit gate is for: a name that dispatches but cannot
+    // be suggested helps nobody who mistypes it.
+    n = list_push(n, "recurse");
+    n = list_push(n, "walk");
     n = list_push(n, "range");
     n = list_push(n, "reverse");
     n = list_push(n, "rindex");
+    n = list_push(n, "indices");
     n = list_push(n, "round");
     n = list_push(n, "rtrimstr");
     n = list_push(n, "scalars");
@@ -83,6 +90,8 @@ pub fn known_names() -> List[String] {
     n = list_push(n, "sub");
     n = list_push(n, "gsub");
     n = list_push(n, "strings");
+    n = list_push(n, "strftime");
+    n = list_push(n, "strptime");
     n = list_push(n, "to_entries");
     n = list_push(n, "todate");
     n = list_push(n, "test");

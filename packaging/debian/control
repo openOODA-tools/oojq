@@ -1,0 +1,14 @@
+Source: oojq
+Section: utils
+Priority: optional
+Maintainer: openOODA-tools <ops@openooda.org>
+Standards-Version: 4.6.2
+Build-Depends: debhelper-compat (= 13)
+
+Package: oojq
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Capability-bounded jq replacement with stdio MCP
+ A capability-bounded jq replacement written in 100% openOODA,
+ delivering 98% jq parity, exact arithmetic, and an agent-native
+ MCP server over stdio.

@@ -132,44 +132,9 @@ pub fn builtin_fromjson(doc: JDoc, idx: Int) -> Result[SRes, String] {
     }
 }
 
-// One pass finds either end. The last match is kept aside while the scan
-// continues, so rindex is the same walk rather than a second one.
-fn find_sub(hay: String, needle: String, last: Bool) -> Int {
-    let total: Int = chars_len(hay);
-    let width: Int = chars_len(needle);
-    if width == 0 || width > total { return 0 - 1; }
-    let mut found: Int = 0 - 1;
-    let mut at: Int = 0;
-    while at + width <= total {
-        let piece: String = str_sub(hay, at, at + width);
-        if piece == needle {
-            if last {
-                found = at;
-            } else {
-                return at;
-            }
-        }
-        at = at + 1;
-    }
-    return found;
-}
-
-fn find_or_null(doc: JDoc, idx: Int, needle: String, last: Bool, named: String) -> Result[SRes, String] {
-    let v: JVal = jval_at(doc, idx);
-    if v.kind != "string" { return Err("\"" + named + "\" needs a string, not a " + v.kind); }
-    let at: Int = find_sub(v.sval, needle, last);
-    if at < 0 { return Ok(null_result(doc)); }
-    let made: SRes = int_result(doc, at);
-    return Ok(made);
-}
-
-pub fn builtin_index(doc: JDoc, idx: Int, needle: String) -> Result[SRes, String] {
-    return find_or_null(doc, idx, needle, false, "index");
-}
-
-pub fn builtin_rindex(doc: JDoc, idx: Int, needle: String) -> Result[SRes, String] {
-    return find_or_null(doc, idx, needle, true, "rindex");
-}
+// index and rindex are not here: they answer over a string AND over an array,
+// so they live on their own page, where a member is compared by value rather
+// than read as text.
 
 // A separator that is not there leaves the whole string as the one part, and an
 // empty separator splits between every character, which falls out of the loop
@@ -197,6 +162,12 @@ fn split_into(doc: JDoc, idx: Int, sep: String) -> Result[SRes, String] {
         let made: SRes = array_result(live, kids);
         return Ok(made);
     }
+    // An empty string has no pieces at all once the separator is not itself
+    // empty. The loop below would not run for it and the trailing piece would
+    // then be the empty string itself, so "" | split("b") answered [""] where
+    // jq answers []. The empty separator case is already handled above and does
+    // agree, which is why this sits after it rather than inside it.
+    if total == 0 { return Ok(array_result(live, kids)); }
     let mut start: Int = 0;
     while at < total {
         let hit: Bool = width > 0 && at + width <= total && str_sub(text, at, at + width) == sep;

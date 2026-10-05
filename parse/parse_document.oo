@@ -47,13 +47,51 @@ fn parse_number(ctx: PCtx, doc: JDoc, off: Int, jv: JsonValue) -> Result[PRes, S
     }
 }
 
-fn parse_array(ctx: PCtx, doc: JDoc, jv: JsonValue) -> Result[PRes, String] {
+fn check_nesting_depth(buf: List[Int], max_depth: Int) -> Bool {
+    let n: Int = list_len(buf);
+    let mut depth: Int = 0;
+    let mut i: Int = 0;
+    let mut in_str: Bool = false;
+    while i < n {
+        let b: Int = list_get(buf, i);
+        if in_str {
+            if b == 92 && i + 1 < n {
+                i = i + 2;
+                continue;
+            }
+            if b == 34 { in_str = false; }
+            i = i + 1;
+            continue;
+        }
+        if b == 34 {
+            in_str = true;
+            i = i + 1;
+            continue;
+        }
+        if b == 91 || b == 123 {
+            depth = depth + 1;
+            if depth > max_depth { return false; }
+        } else if b == 93 || b == 125 {
+            if depth > 0 { depth = depth - 1; }
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn parse_array(ctx: PCtx, doc: JDoc, jv: JsonValue, depth: Int) -> Result[PRes, String] {
+    if depth > 512 {
+        return Err(parse_error(0, "exceeds maximum nesting depth limit (512)"));
+    }
     let offsets: List[Int] = jv.children;
+    if list_len(offsets) > 100000 {
+        return Err(parse_error(0, "array exceeds maximum element limit (100000)"));
+    }
     let mut cur: JDoc = doc;
     let mut kids: List[Int] = list_new();
     let mut i: Int = 0;
     while i < list_len(offsets) {
-        match parse_node(ctx, cur, list_get(offsets, i)) {
+        match parse_node(ctx, cur, list_get(offsets, i), depth + 1) {
             Err(e) => { return Err(e); }
             Ok(r) => {
                 cur = r.doc;
@@ -65,10 +103,16 @@ fn parse_array(ctx: PCtx, doc: JDoc, jv: JsonValue) -> Result[PRes, String] {
     return Ok(jdoc_push(cur, jval_array(kids)));
 }
 
-fn parse_object(ctx: PCtx, doc: JDoc, off: Int, jv: JsonValue) -> Result[PRes, String] {
+fn parse_object(ctx: PCtx, doc: JDoc, off: Int, jv: JsonValue, depth: Int) -> Result[PRes, String] {
+    if depth > 512 {
+        return Err(parse_error(off, "exceeds maximum nesting depth limit (512)"));
+    }
     let offsets: List[Int] = jv.children;
     if list_len(offsets) % 2 != 0 {
         return Err(parse_error(off, "object has an odd number of members"));
+    }
+    if list_len(offsets) / 2 > 50000 {
+        return Err(parse_error(off, "object exceeds maximum member limit (50000)"));
     }
     let mut cur: JDoc = doc;
     let mut keys: List[String] = list_new();
@@ -86,7 +130,7 @@ fn parse_object(ctx: PCtx, doc: JDoc, off: Int, jv: JsonValue) -> Result[PRes, S
                 keys = list_push(keys, jzc_str(kv));
             }
         }
-        match parse_node(ctx, cur, voff) {
+        match parse_node(ctx, cur, voff, depth + 1) {
             Err(e) => { return Err(e); }
             Ok(r) => {
                 cur = r.doc;
@@ -98,13 +142,19 @@ fn parse_object(ctx: PCtx, doc: JDoc, off: Int, jv: JsonValue) -> Result[PRes, S
     return Ok(jdoc_push(cur, jval_object(keys, kids)));
 }
 
-fn parse_node(ctx: PCtx, doc: JDoc, off: Int) -> Result[PRes, String] {
+fn parse_node(ctx: PCtx, doc: JDoc, off: Int, depth: Int) -> Result[PRes, String] {
+    if depth > 512 {
+        return Err(parse_error(off, "exceeds maximum nesting depth limit (512)"));
+    }
+    if list_len(doc.nodes) > 200000 {
+        return Err(parse_error(off, "document exceeds maximum node limit (200000)"));
+    }
     match jzc_parse_value(ctx.buf, off) {
         Err(e) => { return Err(parse_error(off, e)); }
         Ok(jv) => {
             let k: String = jzc_kind(jv);
-            if k == "object" { return parse_object(ctx, doc, off, jv); }
-            if k == "array" { return parse_array(ctx, doc, jv); }
+            if k == "object" { return parse_object(ctx, doc, off, jv, depth); }
+            if k == "array" { return parse_array(ctx, doc, jv, depth); }
             if k == "string" { return Ok(jdoc_push(doc, jval_string(jzc_str(jv)))); }
             if k == "number" { return parse_number(ctx, doc, off, jv); }
             if k == "true" { return Ok(jdoc_push(doc, jval_bool(true))); }
@@ -115,12 +165,14 @@ fn parse_node(ctx: PCtx, doc: JDoc, off: Int) -> Result[PRes, String] {
 }
 
 pub fn parse_document(src: String) -> Result[JDoc, String] {
-    // A \u escape is rewritten into the bytes it stands for first, because the
-    // std reader refuses one. This replaces the plain text buffer outright, so
-    // a byte offset in an error names the rewritten text, which is the only
-    // place the escape can still be pointed at.
+    if chars_len(src) > 16777216 {
+        return Err("parse error: document exceeds maximum size limit (16MB)");
+    }
     let raw: List[Int] = unescape_unicode(src);
     let hint: String = buffer_preview(raw, 0, buffer_len(raw));
+    if !check_nesting_depth(raw, 512) {
+        return Err("parse error: exceeds maximum nesting depth limit (512)\nhint: " + hint);
+    }
     let sh: Shadow = build_shadow(raw);
     let ctx: PCtx = PCtx { buf: sh.buf, spans: sh.floats };
     match jzc_parse(ctx.buf) {
@@ -128,7 +180,7 @@ pub fn parse_document(src: String) -> Result[JDoc, String] {
             return Err("parse error: " + e + "\nhint: " + hint);
         }
         Ok(jv) => {
-            match parse_node(ctx, jdoc_new(), 0) {
+            match parse_node(ctx, jdoc_new(), 0, 0) {
                 Err(e) => { return Err(e); }
                 Ok(r) => {
                     let mut d: JDoc = r.doc;

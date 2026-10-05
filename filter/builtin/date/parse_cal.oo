@@ -1,0 +1,61 @@
+// # The Month And Weekday Names
+//
+// Logline: The twelve months and the seven weekdays as jq spells them and as the broken-down array numbers them, each read with the position it stopped at.
+// Setup: Pure, no capability needed. parse_names.oo owns the matching rules, the blank handling, and the text holder; this page is the table those rules are pointed at.
+// Beats:
+//   1. Months from zero and weekdays from Sunday, which is the order the array keeps them in, so the index is the answer and the name is only how it was found.
+//   2. Every entry a full word and its first three letters, tried in the order parse_names.oo reads them, with nothing in between.
+
+import "filter/builtin/date/parse_names.oo";
+
+// The month as the array numbers it, from zero, as a pair with the position
+// past the name, or an empty list for no match. "Mar", "MAR" and "March" all
+// answer 2; "Sept" answers nothing, because only the full word and its first
+// three letters are a name here.
+pub fn rd_month(t: In, p: Int) -> List[Int] {
+    let mut r: List[Int] = rd_word(t, p, 0, "JANUARY", "JAN");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 1, "FEBRUARY", "FEB");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 2, "MARCH", "MAR");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 3, "APRIL", "APR");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 4, "MAY", "MAY");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 5, "JUNE", "JUN");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 6, "JULY", "JUL");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 7, "AUGUST", "AUG");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 8, "SEPTEMBER", "SEP");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 9, "OCTOBER", "OCT");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 10, "NOVEMBER", "NOV");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 11, "DECEMBER", "DEC");
+    if list_len(r) > 0 { return r; }
+    return list_new();
+}
+
+// The weekday as a count from Sunday, which is how the array holds it and what
+// %w writes, so that a format naming both a weekday and a %w has them agree.
+pub fn rd_wday(t: In, p: Int) -> List[Int] {
+    let mut r: List[Int] = rd_word(t, p, 0, "SUNDAY", "SUN");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 1, "MONDAY", "MON");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 2, "TUESDAY", "TUE");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 3, "WEDNESDAY", "WED");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 4, "THURSDAY", "THU");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 5, "FRIDAY", "FRI");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 6, "SATURDAY", "SAT");
+    if list_len(r) > 0 { return r; }
+    return list_new();
+}

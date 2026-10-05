@@ -11,11 +11,11 @@ Part of [openOODA-tools](https://github.com/openOODA-tools).
 
 **The CLI works and is byte-compatible with jq where it overlaps.**
 `parse/`, `filter/`, and `render/` are implemented and `main.oo` wires them to
-argv. 655 behavioural tests and all eight governance gates pass.
+argv. 1036 behavioural tests and all eight governance gates pass.
 
 Current parity against jq 1.8.1, measured by `make parity`: **98%** of the
-filters jq accepts, byte-identical in every output mode — 1947 byte-identical,
-30 refused, 60 answered differently across the three output modes. The case list
+filters jq accepts, byte-identical in every output mode — 2433 byte-identical,
+27 refused, 6 answered differently across the three output modes. The case list
 is the full set in three output modes, not a curated subset, and a case where
 both binaries answer differently is printed on its own line rather than folded
 into either total, so the number cannot flatter the implementation.
@@ -23,13 +23,30 @@ into either total, so the number cannot flatter the implementation.
 A second, deliberately disjoint corpus runs under `make sweep`. It is blind to
 the parity corpus on purpose, and it is the only layer that can find a class of
 input nobody thought of. Two bugs came out of its first run and both are now
-closed. See [How the answers are checked](#6-verification--governance).
+closed: 426 byte-identical, 12 refused, 3 answered differently, 97% of the
+cases jq accepts. See
+[How the answers are checked](#6-verification--governance).
 
 **The percentage measures the corpus, not the program.** Read the byte-identical
-count and the refusal list together, never the ratio alone. All 10 refused cases
-are boundaries written down below: six non-square `sqrt`, two quotients that do
-not terminate, the pre-existing `contains(["x"])`, and `test` on a pattern the
-std regex engine cannot honour.
+count and the refusal list together, never the ratio alone. The loop runs every case
+in all three output modes, so a refused case is counted once per mode: the 27
+refusals are **9 cases**, and every one of them is a boundary written down here
+rather than a hole.
+
+- **6 `sqrt`** of a value that is not a square, which has no exact answer here.
+- **1 `test`** on a pattern carrying a character class, which the std regex
+  engine cannot honour.
+- **2 `strftime`**, both deliberate and both reasoned in [UTC dates](#utc-dates):
+  `%s`, which jq answers in the machine's own timezone — three different values
+  for one input, measured — and a format written as a generator, which the hub
+  refuses for `index`, `rindex`, `contains`, and `error` too, because the
+  literal-argument path can only carry one value.
+
+Four more `strftime` cases are in the corpus but are *not* in that 27: jq rejects
+them outright (`strftime(1)`, a bare `strftime`, and two bad datetime values), so
+the loop never reaches oojq and books them as cases jq rejects rather than as
+parity requirements. They are covered by `make test` instead. Nothing else in the
+corpus is refused.
 
 Two cases are answered differently (the sweep counts each over a few inputs, so the
 raw "answered differently" line reads higher). They are in the corpus on purpose and
@@ -169,6 +186,337 @@ not a rule jq chose. oojq answers `-1`, which is what 1969-12-31T23:59:59Z *is*.
 Replicating a C-library boundary bug is not jq-compatibility, so this is left as a
 deliberate one-case divergence. The lesson matches the float work: a rule read off
 jq has to be tested on a second shape of expression before it is believed.
+
+`strftime` is the sixth member of the family, in `filter/builtin/date/strftime.oo`, and
+it takes both shapes jq takes: a **number**, read as seconds since the epoch exactly as
+`gmtime` reads it, or the **eight-slot array**, normalized the way a C `struct tm`
+normalizes. That normalization is not a detail — it is most of what `strftime` is. A
+month past December rolls into the next year, a day of `0` is the day *before* the
+first, an hour of 25 is one o'clock the next day, and slots 6 and 7 are ignored and
+recomputed from the date. So `[]` is `1899-12-31 00:00:00` (the zeroed struct, which is
+1900 less one day) and `[-1]` is `-2-12-31`, because a year of −1 with a day before its
+first January is a year of −2. Every base code is implemented — `%Y %y %C %m %d %e %j
+%H %I %M %S %p %a %A %b %B %u %w %U %W %G %V %z %Z %n %t %%` — along with all eight
+composites, which are pushed back onto the format queue so `%c` and `%F` are each
+defined once. `144 of 146 measured cases are byte-identical to jq**,` including `%X`
+being the twelve-hour clock (`02:30:25 PM`) where C would give `%H:%M:%S`, and `%y`
+wrapping so a year of −1 is `99`.
+
+The two that are not are refusal *wording*: `strftime(["%Y"])` and `strftime(null)` get
+oojq's generic "needs a scalar literal argument" where jq says `strftime/1 requires a
+string format`. Both refuse, which is what matters; neither answers wrongly.
+
+**`%s` is refused, and that is the interesting decision here.** jq's `%s` is not the
+epoch of the instant being formatted — it is `mktime` of a *wall clock*, so it reads in
+the machine's own timezone. Measured here: `1425601825` on this host, `1425565825`
+under `TZ=UTC`, `1425533425` under `TZ=Asia/Tokyo`, all for the same input. oojq has no
+timezone database and no clock, so the UTC epoch would be the right answer for exactly
+one of those machines and silently wrong on every other. It refuses the whole call with
+the reason: `strftime format code %s needs the local UTC offset, which this build cannot
+read`. The same reasoning is why `now`, `localtime`, and `local` are still absent, and
+why the *rest* of `strftime` — including `%Z`, which jq also always writes as `GMT`, and
+`%z`, always `+0000` — is implemented rather than refused alongside it. A value that is
+right on one machine and wrong on the next is not an answer; it is a coin toss.
+
+`strptime` is the seventh, in `filter/builtin/date/strptime.oo` with its three
+helpers, and it is the one where **the contract had to be measured rather than
+assumed — twice.** An earlier reading of jq said the composite codes could not be
+parsed at all. That reading was wrong, and it was wrong because of a shell
+escaping bug in the probe itself: the format string reached jq as `%%F` instead
+of `%F`, every case failed, and "all eight refuse" looked like a clean finding.
+Re-measured one escape level down, **seven of the eight composites parse** and
+only `%c` is refused, for every one of seven different input shapes. The same
+second measurement found that **jq's reading table and its writing table
+disagree in one place**: `%x` is `%m/%d/%Y` when reading and `%m/%d/%Y` when
+writing is `%m/%d/%y`, so `"03/05/15"` is 2015 under `%D` and 15 under `%x`.
+That is why the composite table lives in its own page, `parse_codes.oo`, spelled
+once, rather than inlined in the walk where a copy could drift from `strftime`.
+
+Across 401 measured cases the implementation is **byte-identical to jq on 297**
+and every one of the remaining 104 is a refusal. There are no wrong answers.
+The refusals fall into exactly three kinds, and the count of each was taken by
+reading the answers rather than by assuming:
+
+- **86 rest on a slot jq never computed.** A format naming no date — `"14"`,
+  `"%H"`, `"%T"`, `"%p"`, `"%Z"`, `"%z"` alone — leaves jq's weekday and day of
+  the year as whatever its C stack held. The signature is stable and is not a
+  valid date: slot 6 is `8`, which is not a weekday, and slot 7 is `367`, which
+  is not a day of any year that has one. Every one of the 86 was checked to carry
+  one of those before being counted.
+- **5 are jq's ninth element.** **jq's `strptime` does not require the format to
+  consume the whole input.** What is left over is appended to the answer as a
+  ninth element — a **String** where the ninth element of `gmtime` is an
+  **integer** UTC offset. `"2015 extra" | strptime("%Y")` answers
+  `[2015,0,0,0,0,0,3,-1," extra"]`. oojq refuses and says which text was left
+  over, because a number slot holding text is not a shape worth reproducing.
+- **12 are cases jq also refuses**, differing only in wording.
+
+The rest of the contract is implemented because it was measured, and several
+parts of it are not what a first reading suggests. **A day of the year fills in
+the month and the day independently**: `"2015 064 9" | strptime("%Y %j %d")` is
+the 9th of March, and `"2015 9 064" | strptime("%Y %d %j")` is the same date,
+because `%d` wrote the day and `%j` wrote the month whichever order they appear
+in — but a month already named is left alone, so `"2015 12 031"` is the 31st of
+December. A yearday that walks off the end of its year gets jq's own nonsense
+answer, a **month of 24** and a day of 31, while still taking the weekday from
+the real date a year on: `"2015 366"` is a Friday and `"1900 366"` a Tuesday,
+both of them nameable and both shipped. `%Z` runs to the next **blank** and not
+to the next dash, so `GMT-2015` is one token and `"%Z-%Y"` finds no dash to
+match. `%u` counts seven days to Sunday, so `7` is `0`. `%z` checks its minutes
+and not its hours: `+2500` and `+9900` are accepted, `+0060` is refused. And a
+name is matched in full before its first three letters, which is the whole
+difference between reading `March` as `March` and reading it as `Mar` with `ch`
+left over.
+
+That last one was found by a harness, not by reading, and it is the shape of
+thing this project keeps finding: **the first implementation of a reader that
+returns two answers conflated them.** One `Int` was carrying both "March is
+month 2" and "the match ended at 5", which works for every case where the two
+coincide — `Mar` — and is wrong for every case where they do not. Four wrong
+answers came out of that one page, and none of them would have been found by
+testing `Mar` alone.
+
+### Two builtins, one shape each
+
+`has` and `join` were both wrong, and both were wrong the same way: each had
+one shape in mind and coerced the rest into it. `has` asked an object whether
+it carried a name, so `{"a":1} | has(1)` answered `false` where jq refuses, and
+the refusal names both sides — `Cannot check whether object has a number key`.
+`join` accepted an array of strings, so it refused `[1,2,3] | join(",")` where
+jq answers `"1,2,3"`, and — worse — it read its **separator as text**, so
+`["a","b"] | join(1)` answered `"a1b"` where jq refuses outright.
+
+That last one is the interesting half. **jq's `+` does not coerce**: a string on
+the left concatenates a string, leaves itself alone for a null, and refuses a
+number, a boolean or a container. `"a" + 1` is an error in jq, not `"a1"`.
+`join` is a reduce whose every step is an ordinary `+`, and the two operands are
+treated differently on purpose. The **member** is spelled to text first, which
+is why `[1,2,3]` joins at all and `[[1],[2]]` does not join at all. The
+**separator** is added as it was written, which is why `join(1)` is a refusal
+and `join(null)` is a no-op. The accumulator is written into the arena as it is
+built because the refusal names the string that had been *reached*:
+`{"a":1,"b":[1,2]} | join(",")` fails on
+`string ("1,") and array ([1,2]) cannot be added`, with the comma already inside
+the quoted half.
+
+An object joins its **values**, in the order it already holds them:
+`{"b":2,"a":1}` is `"2,1"`, not a sort. A null member is the empty string, so
+`[1,null,true]` is `"1,,true"`. A non-iterable input is
+`Cannot iterate over null (null)`, with the value written the way it was
+written.
+
+`has` has a rule worth naming, because it looks like it needs a rounding and
+does not. jq tests `0 <= trunc(n) < length`, and `has(-0.5)` is **true** — which
+is what shows it is not testing `0 <= n`. For an integer length that collapses
+exactly to `n > -1 and n < length`, so a float key is answered by two exact
+comparisons and never by a truncation this build has no way to take. A null
+input is `false` for every key kind, including the ones an array would refuse,
+because there is no shape left to ask about.
+
+Both are measured rather than asserted: **64 of 64 `has` cases and 51 of 51
+`join` cases are byte-identical to jq 1.8.1**, every refusal sentence included.
+
+### The third one was the same bug wearing a different hat
+
+`add(f)` used to be refused, and the refusal was correct — it just said so
+awkwardly. The reason it was refused at all is the third instance of the shape
+this section is about. `add` had one shape in mind, an array of numbers, and
+`add(.)` was read as "sum the members", so `[1,2,3] | add(.)` answered `6` where
+jq answers `[1,2,3]`. That is a **different number**, not a different shape, and
+it is the worst kind of gap because nothing about it looks like a gap.
+
+The rule is jq's own definition: **`add(f)` is `[f] | add`.** The filter runs
+once over the whole input and *every answer it gives* is summed. Measured, that
+is the whole of it:
+
+| filter | answer | why |
+|---|---|---|
+| `[1,2,3] \| add(.)` | `[1,2,3]` | one member, the input itself |
+| `[1,2,3] \| add(.[])` | `6` | the collect holds the three members |
+| `[1,2] \| add(.[0], .[1])` | `3` | a top-level comma is one argument |
+| `[1,2,3] \| add(empty)` | `null` | an empty collect is an empty array |
+| `[1,2,3] \| add(.;.)` | refused | a semicolon is `add/2`, and there is none |
+
+So it is a **parse-time rewrite** to `[f] | add`, in
+`filter/builtin/rewrite/rewrite.oo`, which costs the evaluator nothing: a collect
+already walks the body and the bare `add` already sums an array. That is the
+same bargain `recurse`'s two-argument form and `map_values` already take.
+
+The one case that would have been a **wrong answer** rather than a gap is the
+last row, and measuring found it before writing anything. A top-level comma is
+one argument holding a generator, so `add(.[0], .[1])` is legal and is `3`. A
+top-level **semicolon** is a *second argument*, and jq answers
+`add/2 is not defined` — so a body carrying one is refused by name, using the
+module's existing `semi_at_top`, rather than collected into `[a;b]` and summed.
+Saying "a semicolon is a second argument" is the difference between a refusal a
+reader can act on and a number they cannot explain.
+
+**46 measured cases, 42 byte-identical, 0 wrong answers.** The four differences
+are all refusals on both sides: `add()` and `add( )` are syntax errors in jq and
+`"add()" needs an argument in this build` here, and `add(f)` with an undefined
+name is `f/0 is not defined` in jq and `unknown builtin "f"` here.
+
+### The failure that looks like a pass
+
+The kind matrix — every dispatched builtin against every input kind against
+every scalar argument, 4 620 cases — is the layer that keeps finding things
+reading does not. Its latest run reported **714 cases where one side answered
+and the other did not**. Almost all of them were one defect wearing many names:
+
+```
+1          | tonumber("b")     ->  1     jq: tonumber/1 is not defined
+"abc"      | length(1)         ->  3     jq: length/1 is not defined
+"abc"      | type(1)           ->  "string"
+1.5        | ascii_upcase("b") ->  1.5
+```
+
+oojq read the body and **ignored it**. The value it produced is the correct
+answer to the call the reader did *not* make, which is the worst shape a wrong
+answer can take: it is silent, it is plausible, and nothing about it looks like
+a gap. Across 21 builtins that is ~700 cases, and a test written against
+`length(1)` would have recorded `3` as correct.
+
+The repair is a parse-time refusal in `filter/builtin/rewrite/arity.oo`, and the
+name list is **measured, not remembered**. Each of the 94 names this build knows
+was asked about at arity 1 *and* at arity 2 against jq 1.8.1:
+
+- refused at **both** → the name takes no body at all. 47 of them.
+- refused only at arity 1 → it keeps its two-argument form. That test is what
+  keeps `sub` and `gsub` out of the list: `sub("a")` is `sub/1` and does not
+  exist, `sub("a";"b")` is `sub/2` and does. Listing `sub` would have refused a
+  call that works.
+
+It is a **deny-list**, not an allow-list of what takes a filter, on purpose. Every
+name left out behaves exactly as it does today, so a builtin that takes a body
+and is not listed is a coverage gap rather than a working call that stops
+working. Both directions are gated: 47 of 47 listed names refuse with jq's own
+`length/1 is not defined` sentence, and 47 of 47 others — `first`, `last`, `map`,
+`any`, `sort_by` — still take their bodies.
+
+The same run found one more, in the opposite direction: oojq was *refusing*
+something jq answers. `contains` over two booleans. jq says a boolean contains
+**itself** and not the other one, so `true|contains(true)` is `true` while
+`true|contains(false)` is refused. The test here had been "the two kinds match",
+which is the same for every kind pair except this one — and for this one it
+answered a value where jq gives a refusal.
+
+**714 → 17.** Of the 17, six are the deliberate `index`-into-an-object refusal
+and eleven are `range` with a float bound, which is a gap rather than a wrong
+answer: oojq answers `range needs whole numbers` where jq answers `0 1`. The
+rule there is exact and is the next thing to implement — `range(from; to; by)`
+emits `from, from+by, …` while the next value is `< to`, in real numbers, so
+`range(0.5;2.5)` is `0.5 1.5` and `range(1.5)` is `0 1`.
+
+### A construct refused in one position and not the other
+
+`1 as $x | $x` answered `unexpected "a" at character 3`. The same word at the
+start of a filter was refused properly — `binding a variable with "as" is not
+supported in this build` — so the construct was readable in one of the two
+places a reader would write it, and the message at the other named neither the
+construct nor the reason.
+
+It was not only `as`. Every reserved word behaved this way, because all of them
+are recognised in one place only:
+
+| filter | before | after |
+|---|---|---|
+| `1 as $x \| $x` | `unexpected "a" at character 3` | `binding a variable with "as" is not supported…` |
+| `1 reduce . as $x (0;.)` | `unexpected "r" at character 3` | `"reduce" is not supported…` |
+| `1 def f: 1; f` | `unexpected "d" at character 3` | `"def" is not supported…` |
+| `1 label $out \| 1` | `unexpected "l" at character 3` | `"label" is not supported…` |
+
+Nineteen lines in `filter/syntax/parse_top.oo`: when leftover text begins with an
+identifier that is a reserved word, that word's own sentence is returned.
+`reserved_word` became public so the two positions share one list rather than
+two drifting copies.
+
+The part that matters more is what it must **not** do. A leftover that is not a
+reserved word still gets the generic `unexpected` message, so `1 2`, `1 @` and
+`.a b` still say `unexpected "2" at character 3`. A fix that swallowed every
+leftover would look tidier and would hide a real syntax error behind a sentence
+about a feature, so the harness checks the generic path as well as the new one,
+along with six ordinary filters that must still parse.
+
+### A counter nobody can read is a counter nobody can hold to
+
+`make parity` reported `jq rejects case 135 (not a parity requirement)` and moved
+on. That number had gone to 213 by the time anybody looked, and **78 of those
+cases were not jq being careful — they were my own typos**.
+
+A parity case jq cannot compile contributes nothing: it is neither agreement nor
+divergence, so it can never fail and never teaches anything. Ten new cases
+looked fine in the source and were silently inert. Eight of them were not valid
+jq at all, because only `as` binds an expression on its left — `1 reduce …`,
+`1 def …` and `1 label …` are syntax errors, so the corpus was scoring nothing
+for them.
+
+Both loops now print the cases jq refuses, sorted, the way the refusal list is
+printed:
+
+```
+  jq rejects case 177  (not a parity requirement, listed below)
+  the cases jq ITSELF refuses, printed because a counter nobody can read is a
+  counter nobody can hold to:
+  jq refuses  0.1%0.05
+  jq refuses  1%0.3
+  jq refuses  [[1,2]]|@csv
+```
+
+That is the same lesson as printing refusals rather than counting them, applied
+to the bucket that was hiding the typos. It is the bucket a malformed case lands
+in, which makes it the one bucket that must be readable.
+
+The eight invalid cases came out of the corpus — their refusal messages are
+pinned by `make test` assertions, which is the right place for them, since parity
+cannot score a filter jq will not parse. What stayed is the three that are real
+jq: `1 as $x | $x`, `as $x` and `.a as $x | .`, and those now show up honestly as
+**unsupported** rather than as nothing at all.
+
+A related trap, in the same edit: `$$` is how a `$` reaches the shell from a
+recipe, so `1 as $x | $x` in a Makefile arrives as `1 as  |` — a mangled filter
+that jq also rejects, and so was equally invisible. `make -n parity | grep` is
+how that one was found, and it is the cheapest way to see what a corpus entry
+actually became.
+
+### A feature that looked like a free rewrite, and was not
+
+`//=` is the obvious sibling of `|=`, and the two look interchangeable:
+
+```
+.a //= 9     jq:  {"a":1}     (1 is truthy, so nothing changes)
+.a |= (. // 9)  the same thing
+```
+
+Measuring them against each other across ten shapes found two where the rewrite
+is **silently wrong**, and both are the same cause — jq reads the right-hand
+side **eagerly**, before it looks at the left:
+
+| filter | jq | the `\|=` rewrite |
+|---|---|---|
+| `.a //= (empty)` | **nothing** | `{"a":1}` |
+| `.a //= error("x")` | **error: x** | `{"a":1}` |
+| `.a //= (1\|debug)` | `["DEBUG:",1]` | `{"a":1}` |
+
+The first is not expressible at all: `//=` with an empty right-hand side
+produces *no output*, and `|=` assigns a value, so it cannot say "this
+assignment happened to nothing" — that needs a binding, and this build has no
+variables. The other two are the same eagerness seen from two sides.
+
+So the rewrite was not taken. It would have converted a **loud** refusal into a
+**quiet** wrong answer, which is the one trade this project will not make for
+convenience. What changed instead is that the decision is now on the record: the
+refusal names both divergences and says the `|=` spelling is "silently wrong for
+an impure right hand side", and seven assertions generated from live jq pin the
+whole boundary — including that `.a |= (. // 9)` *is* supported here, that it
+fills a null the way jq does, and that it leaves `0` and `""` alone because
+**both are truthy in jq**, which is the part most likely to be got wrong by
+anyone reading the table above and assuming "falsy" means "null and false".
+
+Everything else about the operator was already right. `.d //= 9` leaves `d` at
+`0` and `.e //= 9` leaves `e` at `""`; a missing `.z` is created. The gap was
+never the semantics, it was one unreachable corner of them.
+
+
 
 jq turns out to have **two** ways to write a double and they disagree: a number
 parsed from text keeps its point and takes `1E+16`, while a computed one loses
@@ -375,13 +723,51 @@ the first one that names an existing file is treated as filter text, so
 
 ---
 
-## 2. Build & Verify
+## 2. Installation & Verification
+
+`oojq` has zero runtime dependencies. It compiles to a standalone native binary linked directly with the host libc.
+
+### Universal Web Installer
+Installs the standalone native binary to `/usr/local/bin` (or `~/.local/bin`) with automatic SHA-256 seal verification:
+
+```bash
+curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash
+```
+
+### Native Packages (APT & DNF)
+Prebuilt packages are attached to every [GitHub Release](https://github.com/openOODA-tools/oojq/releases):
+
+```bash
+# Debian, Ubuntu (APT)
+sudo apt install ./oojq_0.1.0-1_amd64.deb
+
+# Fedora, RHEL, Rocky, Alma (DNF)
+sudo dnf install ./oojq-0.1.0-1.*.rpm
+```
+
+### Installer Options
+```bash
+# Preview actions without modifying the host
+curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash -s -- --dry-run
+
+# Verify cryptographic SHA-256 seal only
+curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash -s -- --verify
+
+# Custom installation prefix
+curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash -s -- --prefix ~/.local/bin
+
+# Clean uninstall
+curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash -s -- --uninstall
+```
+
+### Source Build & Verification
 
 ```sh
-make build     # compile main.oo to dist/oojq
-make test      # 488 behavioural assertions against the built binary
-make parity    # byte-compare every filter against the real jq
-make verify    # line-cap, file-law, academy, density, test, check
+make build       # compile main.oo to dist/oojq
+make test        # 1036 behavioural assertions against the built binary
+make parity      # byte-compare every filter against the real jq
+make verify      # line-cap, file-law, academy, density, suggest-audit, dead-tests, dup-names, check
+make package     # build .deb and .rpm packages
 ```
 
 `make parity` runs the same filters through the installed `jq` and through
@@ -391,6 +777,20 @@ and skips cleanly when jq is not installed.
 
 Requires the `oodac` compiler, found at `~/.openooda/bin/oodac`, falling back to
 `../../openOODA/oodac/bin/oodac`. Override with `make OODA_COMPILER=/path/to/oodac`.
+
+**After a compiler update, clear the build cache before the first build.**
+
+```sh
+rm -rf .ooda-cache dist/oojq && make build
+```
+
+The cache is keyed on the `.oo` files it read, not on the compiler that read them,
+so an update leaves it able to hand back the previous compiler's decisions for
+pages whose source did not change. The result is a binary that builds cleanly,
+passes `oodac check` on every page, and is simply wrong: 381 of the 687 assertions
+that existed then failed that way under oodac v2.11.8, in three unrelated families, all of them
+values read wrong at runtime. `make build` keys only on the `.oo` mtimes, so it
+will not notice that `oodac` itself is newer and may report `Nothing to be done`.
 
 ---
 
@@ -473,13 +873,17 @@ that starts with a dash.
 | `.a[9]` | `null` when the index is out of range |
 | `a \| b` | run `b` over each result of `a` |
 | `a, b` | both results, in source order |
+| `if c then a else b end` | `a` when `c` is truthy, `b` otherwise |
+| `if c then a elif c2 then b end` | the first branch whose condition is truthy, left to right |
 
 Builtins:
 
 | Shape | Names |
 |---|---|
 | no argument | `length` `keys` `type` `not` `empty` `reverse` `sort` `unique` `add` `first` `last` `min` `max` `to_entries` `from_entries` `tostring` `tonumber` `ascii_downcase` `ascii_upcase` |
-| one literal argument | `has("k")` `range(n)` `join("-")` `startswith("s")` `endswith("s")` `contains("s")` `ltrimstr("s")` `test("re")` |
+| one literal argument | `has("k")` `range(n)` `join("-")` `startswith("s")` `endswith("s")` `ltrimstr("s")` `test("re")` |
+| one literal of any shape | `contains(x)` — a string, a number, an array, or an object |
+| position of a value | `index(x)` `rindex(x)` `indices(x)` — over a string or an array; an object is refused |
 
 ### Exit Codes
 
@@ -551,10 +955,38 @@ $ oojq .tags[] demo.json
 Each is refused by name rather than silently approximated, because a narrowed
 filter that returns a confident wrong answer is worse than a refusal.
 
-- **The date builtins `now`, `localtime`, `gmtime`-as-a-string, `strftime`, and
-  `strptime` are still refused.** `gmtime`, `mktime`, `todate`, `fromdate`, and
-  `fromdateiso8601` are implemented (see *UTC dates* above); these are the rest.
+- **The date builtins `now`, `localtime`, and `gmtime`-as-a-string are still
+  refused.** `gmtime`, `mktime`, `todate`, `fromdate`, `fromdateiso8601`,
+  `strftime`, and `strptime` are implemented (see *UTC dates* above); these are
+  the rest.
 
+- **Errors go to stdout, where jq puts them on stderr.** `oojq -c '2|sqrt' > out`
+  writes the refusal *into* `out`, and `2>/dev/null` does not hide it. This is
+  not a choice. The runtime exposes **no stderr writer**: `print` lowers to
+  `@oo_print_str`, which writes to stdout with no trailing newline, and
+  `eprintln` — although the compiler *knows* the name, in `tc_names_known.oo`
+  and in the side-effect classifier in `ll_fn.oo` — has **no lowering at all**.
+  There is no `@oo_eprintln` declaration in `ll_need_tab.oo` and no matching
+  runtime symbol anywhere in the toolchain, so calling it would not write
+  anywhere. The compiler is a parent project and out of bounds here, so the
+  divergence is recorded and **asserted** rather than papered over: three
+  assertions in `make test` pin the exact text on stdout, pin stderr to empty,
+  and pin the version banner to stdout, so the day the runtime grows a stderr
+  writer the suite says so instead of the docs quietly going stale.
+
+- **Exit codes are oojq's own contract where jq's are finer.** jq distinguishes
+  `2` for a usage or system error, `3` for a compile error, and `5` for a
+  runtime error; oojq returns `2` for all of them, which is written down in
+  `main.oo` and encoded in 47 assertions. Two of the three are already matched
+  exactly: `-e` reports `4` for never having produced a value, and `--help` and
+  `--version` exit 0. The remaining gap is deliberate and is not a defect, but
+  it is the one place a shell script that branches on `$?` will see different
+  behaviour from jq.
+
+- **`add` with a filter.** `add` with no argument sums the members and is
+  implemented. `add(f)` — jq's `[f] | add`, which runs the filter once over the
+  whole input and sums every answer — is refused with that reason rather than
+  answered with the member sum, which is a different number. See *Design Notes*.
 - **Variable binding**: `as $x | ...`, `reduce`, `foreach`, and `def`. These
   need a named environment threaded through the evaluator. All of them, plus
   `try`, `label`, `import`, `include`, and `__loc__`, are refused *by their own
@@ -619,11 +1051,33 @@ filter that returns a confident wrong answer is worse than a refusal.
   filter this build can hand over, and an operator that answered something else
   would be a wrong answer. A path naming two members, `(.a,.b) = 7`, is refused
   for the same reason: it needs `reduce` over `path()`, not a literal path.
-- **`recurse(f)` and `walk`,** and the other builtins that take a filter rather
-  than a literal. `getpath`, `range`, `limit`, and `with_entries` are the
-  exceptions. `limit(n; f)` is rewritten at parse time into
-  `[(f)][0:n][]` — collect, slice, iterate — so it costs the evaluator nothing
-  and every case jq answers byte for byte matches, including `limit(0; …)`
+- **`walk`,** and the other builtins that take a filter rather than a literal.
+  `getpath`, `range`, `limit`, `with_entries`, `recurse`, and `walk` are the
+  exceptions. `walk(f)` applies `f` at every node with the value in hand **last**:
+  a container is rebuilt from its walked children and `f` is applied to what was
+  rebuilt, which is why `[[1]] | [walk(if .==[1] then "saw" else . end)]` answers
+  `["saw"]` and not `[[1]]`. A child that answers nothing is dropped and takes its
+  key with it, so `{"a":1,"b":2} | [walk(if .==1 then empty else . end)]` is
+  `[{"b":2}]` while a body that answers twice keeps both, and
+  `1 | [walk(if .==1 then 7,8 else . end)]` is `[7,8]`. Unlike every other
+  filter-argument builtin it keeps **every** answer of its body rather than the
+  last. All twenty-two cases measured against jq 1.8.1 are byte-identical. It is
+  answered by regenerating one level as text and handing that back to the same
+  dispatcher, which is where its recursion comes from — see AGENTS.md for why the
+  recursion cannot live in the text itself, and why the object form updates
+  `.value` rather than walking the entry.
+  `recurse(f)` applies `f` at every level and answers in preorder — the value in
+  hand, then what `f` gives from it, and for each of those the same again — so
+  `[[1],[2]] | [recurse(.[]?)]` is `[[[1],[2]],[1],1,[2],2]` and not the
+  breadth-first `[[[1],[2]],[1],[2],1,2]`. `f` answering nothing ends that branch,
+  an error is **not** caught (jq does not catch it either; the bare `recurse` is
+  safe only because it is written `.[]?`), and a fixed point does not terminate,
+  so `1 | recurse(1)` runs forever exactly as in jq. `recurse(f; cond)` is
+  `recurse(f | select(cond))` — measured, both answer `[1,2,4,8,16]` for
+  `1 | recurse(.*2; . < 20)` — so it is a parse-time rewrite of the argument
+  rather than a second walk. A bare `recurse` means `recurse(.[]?)`. The
+  `limit(n; f)` rewrite is collect, slice, iterate — so it costs the evaluator
+  nothing and every case jq answers byte for byte matches, including `limit(0; …)`
   answering nothing and a count past the end keeping all of them. **Its one
   difference is the count:** jq reads `limit(.a; f)` at run time, while a slice
   bound here is fixed while the filter is parsed, so a count that is not digits
@@ -636,6 +1090,35 @@ filter that returns a confident wrong answer is worse than a refusal.
   object key"* because the index is a number and `from_entries` will not make it
   a name. Its bodies are limited to what this build can already write, so the
   usual `.value += 1` still needs the update operators below.
+- **`map_values` on a value that is not a container, and a bare `map_values`.**
+  `map_values(f)` is otherwise answered in full: it is the **first** answer of `f`
+  at every member, keeping the shape it was given, so `{"a":1,"b":2} |
+  map_values(1,2)` is `{"a":1,"b":1}` and not what `map` would do — `map` gathers
+  every answer, and `[1,2] | map(1,2)` is `[1,2,1,2]`. A member that answers
+  nothing is dropped and takes its key with it. Both shapes are answered by a
+  parse-time rewrite to `to_entries | map(.value |= (f)) | map(select(has("value")))
+  | map(.value)` over an array and the same text into `from_entries` over an
+  object, which is the one route here to "first answer, dropped on empty" over
+  both — the rewrite costs the evaluator nothing, and 17 of 21 probed cases are
+  byte-identical to jq 1.8.1. The remaining four are refusal **wording**, not
+  wrong answers: a number, a string and a null say *"to_entries needs an array or
+  object, not a …"* where jq says *"Cannot iterate over number (1)"*, and a bare
+  `map_values` is *"unknown builtin"* where jq says *"map_values/0 is not
+  defined"*. Both forms refuse, which is the point; matching the wording would
+  cost the hub a line it does not have.
+- **`from_entries` on an entry that is not shaped the way it is read.** The name
+  and value are read from four and two spellings respectively, in an order that
+  is measured rather than taken from the manual: `key` beats `Key` beats `name`
+  beats `Name`, and `value` beats `Value`, while `k`, `v`, `val` and `KEY` are
+  not read at all — so `[{"k":"a","v":1}] | from_entries` is not `{"a":1}`, it is
+  the refusal *"Cannot use null (null) as object key"*, which is also what an
+  entry with no key at all gives. A member that kept its key and lost its value
+  reads as **null**, matching jq; it used to answer nothing at all, which is the
+  exact shape `walk(f)` hands `from_entries` when a child answers empty, so one
+  dropped key of two dropped the whole object. A key that is not a string is
+  refused by kind and by value (*"Cannot use boolean (true) as object key"*), and
+  a non-object entry is refused the way jq indexes it (*"Cannot index number with
+  string \"key\""*). All sixteen cases probed are message-identical to jq 1.8.1.
 - **`splits`, `sub`, and `gsub`, and `test` on a pattern the std engine cannot
   honour.** These are refused by name. The reason for the first three is a
   defect in the std regex engine, not a missing parser: `match_pattern_first`,
@@ -657,17 +1140,18 @@ filter that returns a confident wrong answer is worse than a refusal.
 - **`fromjson?`** — the bare `fromjson` works, and its answer is copied into the
   arena the caller keeps, but `fromjson?` needs a `parse_prim` marker for the
   bare form.
-- **`contains` with a non-string argument**, such as `contains(["x"])`. Only a
-  string, an int, or a float is accepted; anything else is refused by name
-  rather than read as an empty string, which would answer `false` instead of
-  saying so.
 - **`$__loc__`, `input`, `inputs`,** and every other environment or input
   source builtin.
-- **`indices`, `tostream`, `fromstream`, `todate`, and `fromdate`.**
-  `indices` is refused rather than half-built: jq's form takes several values
-  (`"abc" | indices("b","c")` answers `[1]` then `[2]`) and this build's argument
-  path carries one, so a single-argument version would quietly answer for the
-  last value only. `toarray` and `ascii` are deliberately **not** here: jq
+- **`tostream`, `fromstream`, `todate`, and `fromdate`.**
+  `indices` used to be on this list and is **now implemented** — see *Where a
+  value appears* below. Where a builtin takes a generator where this build's
+  argument path carries one, the call **refuses** instead: `index`, `rindex`,
+  `indices`, `contains` and `error` answer *"… takes one value, and the argument
+  written gives several"*, which is where `[1,2] | index(1,2)` used to answer
+  `1` where jq answers `0` then `1`.
+  `setpath` is deliberately left out of that refusal: it takes a generator on
+  purpose and answers once per value. `toarray` and `ascii` are deliberately
+  **not** here: jq
   1.8.1 does not have them either, and matching a builtin that does not exist
   is not parity.
 - **`in` and `combinations`,** both of which jq 1.8.1 itself is broken on. `in`
@@ -720,6 +1204,45 @@ eighteen digits, where the whole root no longer fits.
 `AGENTS.md` is the real document: house laws, domain contracts, and the runtime
 traps that cost debugging time. These are the ones worth knowing before editing:
 
+- **A string operation checks its operands, and getting that wrong is a wrong
+  answer rather than a gap.** Nine builtins read a string out of their argument
+  — `index`, `rindex`, `indices`, `split`, `startswith`, `endswith`,
+  `ltrimstr`, `rtrimstr`, `test` — and each had a path where it coerced the
+  wrong kind instead of refusing: `"abc" | index(1)` answered `null`,
+  `null | startswith("a")` answered `false`, `1 | split("b")` answered `[""]`.
+  All eight are now refused, in **jq's own words**, by one guard in
+  `filter/eval/eval_builtin.oo` because the shape is identical and only the
+  wording differs. The guard runs *before* the generic "needs a scalar literal
+  argument" check, so `"abc" | startswith(null)` says `startswith() requires
+  string inputs` rather than the vaguer sentence. `ltrimstr` borrows
+  `startswith`'s sentence and `rtrimstr` borrows `endswith`'s, because that is
+  what jq does — it builds one from the other. The lesson generalises: **an
+  answer produced for a shape the author did not think about is a wrong
+  answer, and a kind check is the cheapest test there is.**
+- **`""|split("b")` is `[]` and not `[""]`.** The empty string has no pieces
+  once the separator is not itself empty, so the trailing-piece step that makes
+  `"a" | split("a")` give `["",""]` must not run at all. Found by accident, by
+  writing a probe whose pipe changed the input to the builtin under test.
+- **A kind matrix finds what a corpus cannot.** Running every dispatched builtin
+  against every kind of input and every kind of scalar argument — 1 504 agree, and
+  of the 893 that differ, 2 113 more are refusals on both sides differing only in
+  wording — left **29 cases where both binaries answer and the answers differ**.
+  Those are the only ones that matter, and two families came out: **`add(f)`
+  dropped its filter and summed the members instead** (`[1,2] | add(.)` is
+  `[1,2]` in jq and was `3`), and **`index` over a `null` accepted a needle it
+  should refuse**. Both are fixed. The matrix is at `/tmp/kinds.sh`; the
+  discipline is that **a value produced for a shape nobody thought about is a
+  wrong answer, and the cheapest way to find those is to cross the kinds rather
+  than to enumerate more examples.**
+- **`add(f)` is `[f] | add`, not a member sum, and is refused rather than
+  guessed.** jq runs the filter **once over the whole input** and sums every
+  answer, which is why `[1,2,3] | add(.)` is `[1,2,3]` and
+  `[[1,2],[3]] | add(length)` is `2`. Summing the members gives a different
+  number, so the call now refuses with the reason. The machinery to do it
+  properly already exists — collect mode runs a body over the input and gathers
+  every answer — but the page that would finalise it is at the 256-line ceiling
+  and its directory at the 8-page density limit, so it is backlog rather than a
+  rushed change.
 - **Numbers.** std reports a number as the byte offset past its last digit and
   never materialises the digits. `parse/decode_number.oo` is the only place a
   literal becomes an `Int`, and `parse/float_scan.oo` hides decimal points from

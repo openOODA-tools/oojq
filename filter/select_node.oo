@@ -56,7 +56,6 @@ pub fn concat_indices(a: List[Int], b: List[Int]) -> List[Int] {
 }
 
 // --- Node builders shared by the value and run pages ---------------------------
-
 // The three sentences jq refuses with, and the only three it uses. They live
 // here rather than in the builtin that first needed them because four pages
 // now refuse this way and a fifth wording is a fifth place to be wrong.

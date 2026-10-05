@@ -21,7 +21,11 @@ import "parse/decode_number.oo";
 // \"del\"?" — a suggestion that sends the reader after a builtin with one letter
 // in common. An empty answer means the word is not reserved and the name is the
 // evaluator's business.
-fn reserved_word(w: String) -> String {
+// A word jq reserves but this build cannot read, named rather than left to the
+// generic parse error. It is public because the same sentence is owed to a
+// reserved word wherever it turns up, and parse_top meets one after a value has
+// already been read rather than where this one does.
+pub fn reserved_word(w: String) -> String {
     if w == "def" { return "\"def\" is not supported in this build"; }
     if w == "as" { return "binding a variable with \"as\" is not supported in this build"; }
     if w == "reduce" { return "\"reduce\" is not supported in this build"; }
@@ -174,19 +178,25 @@ fn parse_word(c: Cur, ast: AList) -> Result[POut, String] {
     }
 }
 
+// The move check counts a name once per function, not once per path: a name
+// moved inside a branch that has already returned is still moved when the path
+// after that branch is read. So this function may move w exactly once, and the
+// three literal arms below name the word they matched rather than moving w to
+// find out what it was. That leaves the call at the end as the only move, which
+// is also the only one that has to know the word itself.
 fn named_term(c: Cur, ast: AList, w: String) -> Result[POut, String] {
-    if w == "true" || w == "false" || w == "null" {
-        let kind: String = w;
-        let made_node: ANode = node_blank(kind);
-        let add: ARes = ast_add(ast, made_node);
-        return Ok(POut { ast: add.ast, cur: cur_skip(c), node: add.idx });
-    }
-    if w == "if" {
-        return parse_if_body(c, ast);
-    }
-    let spot: Cur = c;
+    if w == "if" { return parse_if_body(c, ast); }
+    if w == "true" { return literal_node(c, ast, "true"); }
+    if w == "false" { return literal_node(c, ast, "false"); }
+    if w == "null" { return literal_node(c, ast, "null"); }
     let word: String = w;
-    return call_or_name(spot, ast, word);
+    return call_or_name(c, ast, word);
+}
+
+fn literal_node(c: Cur, ast: AList, kind: String) -> Result[POut, String] {
+    let made_node: ANode = node_blank(kind);
+    let add: ARes = ast_add(ast, made_node);
+    return Ok(POut { ast: add.ast, cur: cur_skip(c), node: add.idx });
 }
 
 fn call_or_name(c: Cur, ast: AList, w: String) -> Result[POut, String] {

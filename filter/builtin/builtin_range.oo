@@ -1,20 +1,206 @@
 // # Range Builtin
 //
-// Logline: Counts from one bound to another, streaming each whole number it passes on the way.
+// Logline: Counts from one bound to another, streaming from, then each value it passes on the way.
 //
-// Setup: Pure, no capability needed. The bounds are whole numbers written in the filter, so nothing is read from the document.
+// Setup: Pure, no capability needed. The bounds are numbers written in the filter, so nothing is read from the document.
 // Beats:
 //   1. One number counts up from zero, two count from the first, three add a step.
 //   2. The arguments are taken as text, because no filter expression contains a semicolon.
 //   3. The values stream rather than collect, so [range(n)] is what makes an array.
 
 import "parse/anchor.oo";
+import "parse/decode_number.oo";
+import "parse/value_tree.oo";
 import "filter/select_node.oo";
 import "filter/syntax/scan/parse_span.oo";
+import "filter/syntax/scan/parse_lit.oo";
+import "filter/eval/float_op.oo";
 
-// A semicolon divides the bounds. It is named apart from any other splitter of
-// the same job, because two pages answering to one name is how a call ends up
-// reaching the wrong body.
+// fits_int_text answers whether a run of digits is SMALL ENOUGH to be an Int.
+// It does not answer whether the text IS a run of digits, and on "0.0" or
+// "1e2" or "abc" it says yes, because every one of those is shorter than the
+// nineteen characters it measures. A bound has to be asked whether its
+// characters are digits before it can be handed to that check.
+fn whole_text(text: String) -> Bool {
+    let n: Int = chars_len(text);
+    if n == 0 { return false; }
+    let mut i: Int = 0;
+    if char_at(text, 0) == "-" { i = 1; }
+    if i >= n { return false; }
+    while i < n {
+        if !is_digit_byte(byte_at(char_at(text, i), 0)) { return false; }
+        i = i + 1;
+    }
+    return fits_int_text(text);
+}
+
+// A bound is a WHOLE number, a FRACTION, or not a number at all. Which one it
+// is decides how the run below adds: whole from and whole step stay whole all
+// the way, so range(1.5) answers 0 1 and not 0 1.0. The STOPPING bound is not
+// one of the two, because a whole counter can be tested against a fraction
+// without becoming one: range(1;2.5) is 1 2 and range(1e2) is 0 through 99.
+fn bound_kind(text: String) -> Int {
+    if is_float_text(text) { return 2; }
+    if whole_text(text) { return 1; }
+    return 0;
+}
+
+// Which of the three numbers sits in which slot. One bound counts up from zero,
+// two count from the first, three add a step, so the missing ones are written
+// here rather than each caller deciding what an absent argument means.
+fn from_text(parts: List[String], n: Int) -> String {
+    if n == 1 { return "0"; }
+    return list_get(parts, 0);
+}
+
+fn step_text(parts: List[String], n: Int) -> String {
+    if n == 3 { return list_get(parts, 2); }
+    return "1";
+}
+
+// With three numbers the last one is the STEP, so the stopping bound is the
+// middle one. Reading it as the last would make range(0;10;2) count to 2.
+fn to_text(parts: List[String], n: Int) -> String {
+    if n == 1 { return list_get(parts, 0); }
+    return list_get(parts, 1);
+}
+
+fn negative_sign(text: String) -> Bool {
+    if chars_len(text) == 0 { return false; }
+    return char_at(text, 0) == "-";
+}
+
+// A step of zero is not an error, it is a run that never starts. Measured
+// against jq 1.8.1, range(0;10;0), range(0;10;0.0), range(0;10;-0),
+// range(0;10;0.00) and range(0;10;0e0) all answer nothing and exit clean, so
+// refusing here would be answering a case jq answers exactly. Every spelling
+// of zero is caught by comparing the number rather than the text, which is
+// also what stops a zero step from looping forever on the fraction path.
+fn step_is_zero(text: String) -> Result[Bool, String] {
+    let c: Result[Int, String] = float_order(jval_float(text), jval_float("0"));
+    match c {
+        Err(e) => { return Err(e); }
+        Ok(ord) => {
+            let z: Bool = ord == 0;
+            return Ok(z);
+        }
+    }
+}
+
+// One comparison, one direction, over two numbers read as doubles. The result
+// is bound to a plain Bool first because an Ok(...) written straight into a
+// match arm that binds Ok has no payload type for this compiler to check
+// against.
+fn float_vs(a: JVal, b: JVal, down: Bool) -> Result[Bool, String] {
+    let c: Result[Int, String] = float_order(a, b);
+    match c {
+        Err(e) => { return Err(e); }
+        Ok(n) => { if down { if n > 0 { return Ok(true); } } else { if n < 0 { return Ok(true); } } }
+    }
+    return Ok(false);
+}
+
+// A whole counter is tested against a fractional bound by wrapping each side in
+// the value the float pages understand, which is why 99 < 100 is decided as
+// numbers rather than by reading the digits of "1e2".
+
+// The whole path: from and by are whole, so every value this loop can reach is
+// whole, whatever the stopping bound is. Measured against jq 1.8.1, range(1.5)
+// is 0 1, range(1e2) is 0 through 99, range(1;2.5) is 1 2, range(5;1.5;-1) is
+// 5 4 3 2, and range(0.9) is 0. The step decides the direction and the test is
+// strict, so range(2.5;2.5) is empty.
+fn whole_range(doc: JDoc, kt: Int, parts: List[String], n: Int) -> Result[SRes, String] {
+    let gf: Result[Int, String] = parse_int(from_text(parts, n));
+    match gf {
+        Err(e) => { return Err(e); }
+        Ok(f0) => {
+            let gb: Result[Int, String] = parse_int(step_text(parts, n));
+            match gb {
+                Err(e) => { return Err(e); }
+                Ok(b0) => {
+                    let ttext: String = to_text(parts, n);
+                    let mut t0: Int = 0;
+                    if kt == 1 {
+                        let gt: Result[Int, String] = parse_int(ttext);
+                        match gt {
+                            Err(e) => { return Err(e); }
+                            Ok(v) => { t0 = v; }
+                        }
+                    }
+                    let down: Bool = b0 < 0;
+                    let mut out: List[Int] = list_new();
+                    let mut live: JDoc = doc;
+                    let mut here: Int = f0;
+                    let mut go: Bool = true;
+                    while go {
+                        if kt == 1 {
+                            if down { go = here > t0; } else { go = here < t0; }
+                        } else {
+                            let r: Result[Bool, String] = float_vs(jval_int(here), jval_float(ttext), down);
+                            match r { Err(e) => { return Err(e); } Ok(b) => { go = b; } }
+                        }
+                        if !go { break; }
+                        if list_len(out) >= 100000 { return Err("range output exceeds limit (100000 items)"); }
+                        let made: SRes = int_result(live, here);
+                        live = made.doc;
+                        out = concat_indices(out, made.out);
+                        here = here + b0;
+                    }
+                    return Ok(SRes { doc: live, out: out });
+                }
+            }
+        }
+    }
+}
+
+// The fraction path. The first value is the from bound AS WRITTEN, keeping
+// any trailing point and zero jq keeps. Every subsequent value is computed
+// via binary64 addition.
+fn fraction_range(doc: JDoc, parts: List[String], n: Int) -> Result[SRes, String] {
+    let fr: PRes = jdoc_push(doc, bound_node(from_text(parts, n)));
+    let br: PRes = jdoc_push(fr.doc, bound_node(step_text(parts, n)));
+    let tr: PRes = jdoc_push(br.doc, bound_node(to_text(parts, n)));
+    let mut live: JDoc = tr.doc;
+    let down: Bool = negative_sign(step_text(parts, n));
+    let mut out: List[Int] = list_new();
+    let mut here: Int = fr.idx;
+    let mut go: Bool = true;
+    while go {
+        let a: JVal = jval_at(live, here);
+        let b: JVal = jval_at(live, tr.idx);
+        let r: Result[Bool, String] = float_vs(a, b, down);
+        match r { Err(e) => { return Err(e); } Ok(v) => { go = v; } }
+        if !go { break; }
+        if list_len(out) >= 100000 { return Err("range output exceeds limit (100000 items)"); }
+        out = concat_indices(out, one(here));
+        let step: Result[SRes, String] = float_binop(live, "+", here, br.idx);
+        match step {
+            Err(e) => { return Err(e); }
+            Ok(s) => {
+                live = s.doc;
+                here = list_get(s.out, 0);
+            }
+        }
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+// A bound as a value, keeping the text it was written with when it carries a
+// decimal point or an exponent, because that text is the answer for the first
+// value of a run. A whole bound stays an Int, which is why range(2;0;-0.5)
+// answers 2 1.5 1 0.5: the 2 is written whole and the 1 is computed back to a
+// whole double that prints without a point.
+fn bound_node(text: String) -> JVal {
+    if whole_text(text) {
+        let got: Result[Int, String] = parse_int(text);
+        match got {
+            Err(e) => { return jval_float(text); }
+            Ok(v) => { return jval_int(v); }
+        }
+    }
+    return jval_float(text);
+}
+
 fn range_parts(text: String) -> List[String] {
     let n: Int = chars_len(text);
     let mut out: List[String] = list_new();
@@ -33,66 +219,29 @@ fn range_parts(text: String) -> List[String] {
     return out;
 }
 
-fn bound(text: String) -> Result[Int, String] {
-    let got: Result[Int, String] = parse_int(text);
-    match got {
-        Err(e) => { return Err("range needs whole numbers"); }
-        Ok(v) => { return Ok(v); }
-    }
-}
-
-fn do_range(doc: JDoc, text: String) -> Result[SRes, String] {
+pub fn range_over(doc: JDoc, text: String) -> Result[SRes, String] {
     let parts: List[String] = range_parts(text);
     let n: Int = list_len(parts);
-    if n == 0 || n > 3 {
-        return Err("range takes one to three whole numbers");
+    if n > 3 {
+        return Err("range takes one to three numbers");
     }
-    let mut from: Int = 0;
-    if n > 1 {
-        let a: Result[Int, String] = bound(list_get(parts, 0));
-        match a {
-            Err(e) => { return Err(e); }
-            Ok(v) => { from = v; }
-        }
+    let kf: Int = bound_kind(from_text(parts, n));
+    let kt: Int = bound_kind(to_text(parts, n));
+    let kb: Int = bound_kind(step_text(parts, n));
+    if kf == 0 || kt == 0 || kb == 0 {
+        return Err("Range bounds must be numeric");
     }
-    let mut stop_at: Int = n - 1;
-    if n == 3 { stop_at = 1; }
-    let mut upto: Int = 0;
-    let b: Result[Int, String] = bound(list_get(parts, stop_at));
-    match b {
-        Err(e) => { return Err(e); }
-        Ok(v) => { upto = v; }
-    }
-    let mut by: Int = 1;
     if n == 3 {
-        let c: Result[Int, String] = bound(list_get(parts, 2));
-        match c {
+        let z: Result[Bool, String] = step_is_zero(step_text(parts, n));
+        match z {
             Err(e) => { return Err(e); }
-            Ok(v) => { by = v; }
+            Ok(is_zero) => {
+                if is_zero { return Ok(SRes { doc: doc, out: list_new() }); }
+            }
         }
     }
-    if by == 0 {
-        return Err("range needs a step that is not zero");
+    if kf == 1 && kb == 1 {
+        return whole_range(doc, kt, parts, n);
     }
-    let mut out: List[Int] = list_new();
-    let mut live: JDoc = doc;
-    let mut here: Int = from;
-    let mut go: Bool = true;
-    while go {
-        if by > 0 && here >= upto { go = false; }
-        else if by < 0 && here <= upto { go = false; }
-        else {
-            let r: SRes = int_result(live, here);
-            live = r.doc;
-            out = concat_indices(out, r.out);
-            here = here + by;
-        }
-    }
-    return Ok(SRes { doc: live, out: out });
-}
-
-// range is a zero arity filter: it ignores the value in hand and streams from
-// the bounds it was given.
-pub fn range_over(doc: JDoc, text: String) -> Result[SRes, String] {
-    return do_range(doc, text);
+    return fraction_range(doc, parts, n);
 }

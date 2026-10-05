@@ -1,12 +1,10 @@
 // # Running A Parsed Filter Over A Value Stream
-//
 // Logline: Walks a parsed filter once per value, and owns every built-in whose argument is itself a filter.
-//
 // Setup: Pure, no capability needed. Everything here takes an arena and a list of node indices, so a node that mints a value hands the grown arena to whatever runs next.
 // Beats:
 //   1. Send each node kind to one rule, carrying the arena so minted values stay addressable.
-//   2. Parse a bracketed body when the run reaches it, so a filter argument needs no pass.
-//   3. Fold the joining operators, the bracketed forms, and the members walk.
+//   2. Parse a bracketed body when the run reaches it, and fold the joining operators.
+//   3. Walk the members, and walk again through recurse and walk.
 import "filter/ast.oo";
 import "filter/select_node.oo";
 import "filter/syntax/anchor.oo";
@@ -35,21 +33,19 @@ pub fn eval_filter(ast: AList, node: Int, doc: JDoc, input: List[Int]) -> Result
     return per_value(ast, node, doc, input, false);
 }
 
-// One input value at a time, which is how jq reads every step above a field
-// access. Reading the whole stream in one go made `.items[]|.id * 2` nine
-// answers instead of three, because the operator paired across values and a
-// right hand side that is the same for each answered once per value; the same
-// read made `.items[]|.id, .k` answer the whole left stream and then the right.
-// skip is what a question mark asks for: a value that cannot take the step is
-// left out and the walk goes on, so (.a,.b)|.c? is 2 rather than nothing.
 fn per_value(ast: AList, node: Int, doc: JDoc, input: List[Int], skip: Bool) -> Result[SRes, String] {
     let mut live: JDoc = doc;
     let mut out: List[Int] = list_new();
     let mut i: Int = 0;
     while i < list_len(input) {
+        if list_len(out) > 100000 { return Err("stream size limit exceeded (100000 items)"); }
         match eval_filter(ast, node, live, one(list_get(input, i))) {
             Err(e) => { if !skip { return Err(e); } }
-            Ok(z) => { live = z.doc; out = concat_indices(out, z.out); }
+            Ok(z) => {
+                live = z.doc;
+                if list_len(out) + list_len(z.out) > 100000 { return Err("stream size limit exceeded (100000 items)"); }
+                out = concat_indices(out, z.out);
+            }
         }
         i = i + 1;
     }
@@ -59,11 +55,15 @@ fn per_value(ast: AList, node: Int, doc: JDoc, input: List[Int], skip: Bool) -> 
 fn step_once(ast: AList, node: Int, doc: JDoc, input: List[Int]) -> Result[SRes, String] {
     let n: ANode = ast_at(ast, node);
     if n.kind == "paren" { return eval_text(doc, input, n.sval); }
-    if n.kind == "collect" { return gather(doc, input, n.sval); }
+    // A collect is a per value step, which is per_member's map mode over the value.
+    if n.kind == "collect" {
+        let inner: String = trim_ws(n.sval);
+        if chars_len(inner) == 0 { return Ok(empty_arrays(doc, list_len(input))); }
+        return per_member(doc, input, inner, "collect");
+    }
     if n.kind == "ifthen" { return eval_if(doc, input, n); }
     if n.kind == "bin" { return eval_bin(ast, node, doc, input); }
     if n.kind == "pipe" || n.kind == "comma" || n.kind == "alt" || n.kind == "and" || n.kind == "or" { return fold(ast, node, doc, input, n.kind); }
-    // A literal, and .., are the value in hand, so the leaf page reads them.
     return eval_each(ast, node, doc, input);
 }
 
@@ -82,51 +82,25 @@ fn fold(ast: AList, node: Int, doc: JDoc, input: List[Int], kind: String) -> Res
     }
 }
 
-// A unary minus rides the binary path with no right hand side. Both sides are
-// read over this one value, so a right hand side that ignores its input answers
-// once however many values reached here, and the pairs stay the pairs of this
-// value alone. The pairs are walked right first.
 fn eval_bin(ast: AList, node: Int, doc: JDoc, input: List[Int]) -> Result[SRes, String] {
     let n: ANode = ast_at(ast, node);
     match eval_filter(ast, n.a, doc, input) {
         Err(e) => { return Err(e); }
         Ok(r) => {
-            let mut out: List[Int] = list_new();
-            if n.b < 0 { return neg_over(r.doc, r.out); }
-            match eval_filter(ast, n.b, r.doc, input) {
+            let lefts: List[Int] = r.out;
+            let base: JDoc = r.doc;
+            if n.b < 0 { return neg_over(base, lefts); }
+            match eval_filter(ast, n.b, base, input) {
                 Err(e) => { return Err(e); }
                 Ok(z) => {
-                    let mut live: JDoc = z.doc;
                     let rights: List[Int] = z.out;
-                    let lefts: List[Int] = r.out;
-                    let mut j: Int = 0;
-                    while j < list_len(rights) {
-                        let seed: SRes = SRes { doc: live, out: list_new() };
-                        match append_pairs(seed, n.name, list_get(rights, j), lefts) {
-                            Err(e) => { return Err(e); }
-                            Ok(v) => { live = v.doc; out = concat_indices(out, v.out); }
-                        }
-                        j = j + 1;
-                    }
-                    return Ok(SRes { doc: live, out: out });
+                    return pair_all(z.doc, n, rights, lefts);
                 }
             }
         }
     }
 }
 
-// A collect is a per value step: the body is read once for each value that
-// reached it and the answers become one array, which is per_member's map mode
-// walking the value itself instead of its members.
-fn gather(doc: JDoc, input: List[Int], body: String) -> Result[SRes, String] {
-    let inner: String = trim_ws(body);
-    if chars_len(inner) == 0 { return Ok(empty_arrays(doc, list_len(input))); }
-    return per_member(doc, input, inner, "collect");
-}
-
-// The branch is read over the value the condition was asked of, not over the
-// verdict it answered, and once for each of the condition's answers, so
-// if .a>1 then .a else 0 end reads .a of the value and not of the true.
 fn eval_if(doc: JDoc, input: List[Int], n: ANode) -> Result[SRes, String] {
     match eval_text(doc, input, n.sval) {
         Err(e) => { return Err(e); }
@@ -148,8 +122,6 @@ fn eval_if(doc: JDoc, input: List[Int], n: ANode) -> Result[SRes, String] {
     }
 }
 
-// A question mark turns a refusal into no value here all, so .a.b? is safe,
-// asked of one value at a time so that only the value which fails is left out.
 fn guarded(ast: AList, node: Int, doc: JDoc, input: List[Int], swallow: Bool) -> Result[SRes, String] {
     let n: ANode = ast_at(ast, node);
     if swallow { return per_value(ast, n.a, doc, input, true); }
@@ -191,34 +163,61 @@ fn per_member(doc: JDoc, input: List[Int], body: String, mode: String) -> Result
             }
             j = j + 1;
         }
-        // map is [.[]], and a collect is [.] over the value itself, so both
-        // gather their results into one array; select is the value in hand.
-        // This stayed inline after being moved out to filter/run/member: handing
-        // the kept list to a page that hands it back produced an empty answer for
-        // every mode that uses it, and the compiler reported the build clean.
-        if mode == "map" || mode == "collect" {
-            let made: SRes = array_result(live, kept);
-            live = made.doc;
-            let gathered: List[Int] = made.out;
-            out = concat_indices(out, gathered);
-        }
+        if mode == "map" || mode == "collect" { let made: SRes = array_result(live, kept); live = made.doc; out = concat_indices(out, made.out); }
         if mode == "select" { out = concat_indices(out, kept); }
-        if mode == "any" || mode == "all" {
-            let verdict: SRes = bool_result(live, acc);
-            live = verdict.doc;
-            out = concat_indices(out, verdict.out);
-        }
-        // The five order-by-a-key builtins all arrive with the same pairs here.
-        if is_by_key(mode) {
-            let made: SRes = answer_by_key(live, g, mode);
-            live = made.doc;
-            let got: List[Int] = made.out;
-            out = concat_indices(out, got);
-            g = gs_new();
-        }
+        if mode == "any" || mode == "all" { let verdict: SRes = bool_result(live, acc); live = verdict.doc; out = concat_indices(out, verdict.out); }
+        if is_by_key(mode) { let made: SRes = answer_by_key(live, g, mode); live = made.doc; out = concat_indices(out, made.out); g = gs_new(); }
         i = i + 1;
     }
     return Ok(SRes { doc: live, out: out });
+}
+
+fn recurse_over(ast: AList, node: Int, doc: JDoc, input: List[Int], body: String) -> Result[SRes, String] {
+    if list_len(input) == 0 { return Ok(SRes { doc: doc, out: list_new() }); }
+    if list_len(input) > 1 { return per_value(ast, node, doc, input, false); }
+    let mut here: String = recurse_body(body);
+    if chars_len(here) == 0 { here = ".[]?"; }
+    return recurse_step(doc, list_get(input, 0), here, 0);
+}
+
+fn recurse_step(doc: JDoc, at: Int, body: String, depth: Int) -> Result[SRes, String] {
+    if depth > 1000 { return Err("recurse exceeded maximum depth limit (1000)"); }
+    let mut live: JDoc = doc;
+    let mut out: List[Int] = one(at);
+    match eval_text(live, one(at), body) {
+        Err(e) => { return Err(e); }
+        Ok(r) => {
+            live = r.doc;
+            let mut i: Int = 0;
+            while i < list_len(r.out) {
+                let kid: Result[SRes, String] = recurse_step(live, list_get(r.out, i), body, depth + 1);
+                match kid {
+                    Err(e) => { return Err(e); }
+                    Ok(z) => {
+                        live = z.doc;
+                        if list_len(out) + list_len(z.out) > 100000 { return Err("stream size limit exceeded (100000 items)"); }
+                        out = concat_indices(out, z.out);
+                    }
+                }
+                i = i + 1;
+            }
+        }
+    }
+    return Ok(SRes { doc: live, out: out });
+}
+
+// walk(f) applies f at every node, the value in hand LAST: a container is rebuilt from its walked children and f is applied to what was rebuilt.
+fn walk_over(ast: AList, node: Int, doc: JDoc, input: List[Int], body: String) -> Result[SRes, String] {
+    if list_len(input) == 0 { return Ok(SRes { doc: doc, out: list_new() }); }
+    if list_len(input) > 1 { return per_value(ast, node, doc, input, false); }
+    return walk_step(doc, list_get(input, 0), body);
+}
+
+fn walk_step(doc: JDoc, at: Int, body: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, at);
+    if v.kind == "array" { return eval_text(doc, one(at), "map(walk(" + body + ")) | (" + body + ")"); }
+    if v.kind == "object" { return eval_text(doc, one(at), "to_entries | map(.value |= walk(" + body + ")) | map(select(has(\"value\"))) | from_entries | (" + body + ")"); }
+    return eval_text(doc, one(at), body);
 }
 
 fn run_builtin(ast: AList, node: Int, doc: JDoc, input: List[Int]) -> Result[SRes, String] {
@@ -228,24 +227,24 @@ fn run_builtin(ast: AList, node: Int, doc: JDoc, input: List[Int]) -> Result[SRe
         if chars_len(body) == 0 && !bare_member(n.name) { return Err("\"" + n.name + "\" needs a filter argument"); }
         return per_member(doc, input, member_body(body, n.name), n.name);
     }
-    // What needs no filter argument is answered off the hub, so what is left is a
-    // call whose argument really is a filter. Refused before the body is read:
-    // the body of sub is not a filter.
+    // What needs no filter argument is answered off the hub, and sub is refused
     if n.name == "sub" || n.name == "gsub" { return Err(regex_gap(n.name)); }
+    // recurse and walk walk a filter themselves, so they are read here: each would
+    if n.name == "recurse" { return recurse_over(ast, node, doc, input, body); }
+    if n.name == "walk" { return walk_over(ast, node, doc, input, body); }
     if is_routed(n.name) || n.name == "range" || chars_len(body) == 0 {
         return route_builtin(doc, input, n.name, body);
     }
-    // The argument lands in a grown arena and each field is read only once.
     if list_len(input) == 0 { return Ok(SRes { doc: doc, out: list_new() }); }
-    // A call whose argument is a filter reads that filter over one value, so a
-    // stream of more than one is split first. The two branches above must not do
-    // this: a member builtin walks the stream itself, and a routed one reads its
-    // argument as text. Object construction is what exposed the missing split.
+    // A filter-argument call reads its filter over one value, so more than one is
     if list_len(input) > 1 { return per_value(ast, node, doc, input, false); }
     match eval_text(doc, one(list_get(input, 0)), body) {
         Err(e) => { return Err(e); }
         Ok(r) => {
             if list_len(r.out) == 0 { return run_leaf(doc, input, n.name, 0 - 1); }
+            if list_len(r.out) > 1 && is_single_arg(n.name) {
+                return Err("\"" + n.name + "\" takes one value, and the argument written gives several");
+            }
             let here: Int = list_get(r.out, list_len(r.out) - 1);
             if n.name == "getpath" { return builtin_getpath(r.doc, input, here); }
             if is_written(n.name) { return written_builtin(r.doc, input, n.name, here); }

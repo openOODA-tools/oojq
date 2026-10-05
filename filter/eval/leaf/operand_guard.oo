@@ -1,0 +1,61 @@
+// # Operand Kind Guard
+//
+// Logline: One place that decides whether a builtin and its argument are a pair it can read, and says jq's sentence when they are not.
+// Setup: Pure, no capability needed. It reads the two values out of the arena and writes a sentence, or nothing at all.
+// Beats:
+//   1. One guard rather than nine checks, because an empty answer means the pair is readable and the caller carries on untouched.
+//   2. Name the kind jq names, including a boolean as a boolean and both number kinds as one number.
+//   3. Borrow the sentence of the builtin a name is built from, so ltrimstr is startswith and rtrimstr is endswith.
+
+import "parse/value_tree.oo";
+import "filter/select_node.oo";
+import "render/render_value.oo";
+
+// The sentence each string operation uses when handed a pair of kinds it cannot
+// read, measured from jq rather than invented. An empty result means the pair is
+// one the operation does read, and the caller carries on untouched, so this is
+// one guard rather than nine checks.
+pub fn operand_refusal(doc: JDoc, name: String, here: Int, arg: Int) -> String {
+    let a: JVal = jval_at(doc, here);
+    let b: JVal = jval_at(doc, arg);
+    // An array is searched by VALUE, so any needle at all is a legal needle
+    // there, and [1,null] | index(null) is 1. A NULL is a different shape: it
+    // answers null for a string, a number, and an object, and refuses the three
+    // kinds that are not a position or a name. Measured: null | index(1) and
+    // null | index({}) are both null, while null | index(true), null |
+    // index(null) and null | index([]) are all "Cannot index null with ...".
+    if name == "index" || name == "rindex" || name == "indices" {
+        if a.kind == "null" && b.kind != "string" && b.kind != "int" && b.kind != "float" && b.kind != "object" {
+            return index_refusal("null", b);
+        }
+        if a.kind == "string" && b.kind != "string" { return index_refusal("string", b); }
+        return "";
+    }
+    if name == "split" {
+        if a.kind != "string" || b.kind != "string" { return "split input and separator must be strings"; }
+        return "";
+    }
+    // ltrimstr is startswith with a result, and rtrimstr is endswith, so jq
+    // borrows the sentence of the one it is built from and not its own name.
+    if name == "startswith" || name == "ltrimstr" {
+        if a.kind != "string" || b.kind != "string" { return "startswith() requires string inputs"; }
+        return "";
+    }
+    if name == "endswith" || name == "rtrimstr" {
+        if a.kind != "string" || b.kind != "string" { return "endswith() requires string inputs"; }
+        return "";
+    }
+    // test names the kind it was given rather than the operation, and it says
+    // "or array" because jq takes an array needle as a pattern with flags. That
+    // array is refused further up for not being a scalar, which is a missing
+    // feature rather than a wrong answer, so the guard lets an array past rather
+    // than claim an array is not a string or an array.
+    if name == "test" {
+        if b.kind != "string" && b.kind != "array" { return kind_word(b.kind) + " not a string or array"; }
+        if a.kind != "string" {
+            return kind_word(a.kind) + " (" + shown_value(doc, here) + ") cannot be matched, as it is not a string";
+        }
+        return "";
+    }
+    return "";
+}

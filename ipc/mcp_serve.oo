@@ -65,6 +65,8 @@ fn mcp_call(doc: JDoc) -> Result[String, String] {
     return Err("unknown tool: " + name);
 }
 
+pub fn mcp_max_buffer() -> Int { return 16777216; }
+
 // The loop. A frame that is not complete yet is left in the buffer and more input
 // is asked for; end of input ends the loop, and anything still buffered at that
 // point is a truncated frame, which is reported rather than silently dropped.
@@ -75,6 +77,11 @@ pub fn mcp_serve(fs: &FsReadCap) -> Result[Int, String] {
     // including the one that reports the stream ended early.
     let mut framed: Bool = false;
     while alive {
+        if chars_len(buf) > mcp_max_buffer() {
+            emit(mcp_error("null", 0 - 32700, "frame buffer ceiling exceeded (16MB)"), framed);
+            alive = false;
+            break;
+        }
         let start: Int = mcp_body_start(buf);
         if start < 0 {
             let bare_at: Int = mcp_bare_start(buf);
@@ -95,7 +102,19 @@ pub fn mcp_serve(fs: &FsReadCap) -> Result[Int, String] {
                     }
                     alive = false;
                 }
-                Ok(chunk) => { buf = buf + chunk; }
+                Ok(chunk) => {
+                    let nbuf: Int = chars_len(buf);
+                    let nchunk: Int = chars_len(chunk);
+                    if bare_at < 0 && nbuf + nchunk > 65536 {
+                        emit(mcp_error("null", 0 - 32700, "frame buffer ceiling exceeded (16MB)"), framed);
+                        alive = false;
+                    } else if nbuf + nchunk > mcp_max_buffer() {
+                        emit(mcp_error("null", 0 - 32700, "frame buffer ceiling exceeded (16MB)"), framed);
+                        alive = false;
+                    } else {
+                        buf = buf + chunk;
+                    }
+                }
             }
             continue;
         }
@@ -103,12 +122,27 @@ pub fn mcp_serve(fs: &FsReadCap) -> Result[Int, String] {
         if want < 0 {
             return Err("malformed Content-Length header");
         }
+        if want > mcp_max_buffer() {
+            emit(mcp_error("null", 0 - 32700, "frame size exceeds limit (16MB)"), true);
+            alive = false;
+            break;
+        }
         framed = true;
         let end: Int = mcp_body_end(buf, start, want);
         if end < 0 {
             match oo_read_stdin_chunk(fs, mcp_idle_ms()) {
-                Err(e) => { return Err("truncated frame at end of input"); }
-                Ok(chunk) => { buf = buf + chunk; }
+                Err(e) => {
+                    emit(mcp_error("null", 0 - 32700, "truncated frame at end of input"), framed);
+                    alive = false;
+                }
+                Ok(chunk) => {
+                    if chars_len(buf) + chars_len(chunk) > mcp_max_buffer() {
+                        emit(mcp_error("null", 0 - 32700, "frame buffer ceiling exceeded (16MB)"), framed);
+                        alive = false;
+                    } else {
+                        buf = buf + chunk;
+                    }
+                }
             }
             continue;
         }

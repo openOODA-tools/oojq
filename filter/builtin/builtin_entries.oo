@@ -11,6 +11,7 @@
 import "parse/anchor.oo";
 import "filter/select_node.oo";
 import "std/core/primitives/str.oo";
+import "render/render_value.oo";
 
 fn member_index(e: JVal, name: String) -> Int {
     let mut i: Int = 0;
@@ -21,16 +22,6 @@ fn member_index(e: JVal, name: String) -> Int {
         i = i + 1;
     }
     return 0 - 1;
-}
-
-fn member_text(doc: JDoc, e: JVal, name: String) -> String {
-    let here: Int = member_index(e, name);
-    if here < 0 {
-        return "";
-    }
-    let child: Int = list_get(e.kids, here);
-    let v: JVal = jval_at(doc, child);
-    return v.sval;
 }
 
 fn member_child(e: JVal, name: String) -> Int {
@@ -104,26 +95,58 @@ pub fn builtin_to_entries(doc: JDoc, idx: Int) -> Result[SRes, String] {
     return Ok(arr);
 }
 
-// from_entries reads key and value off each element and rebuilds the object.
+// from_entries reads key and value off each element and rebuilds the object. jq
+// 1.8.1 reads four spellings of the key and two of the value, in the order below,
+// measured rather than taken from the manual: key beats Key beats name beats Name,
+// while k, v, val and KEY are not read at all, so [{"k":"a","v":1}] is not {"a":1}.
+fn entry_key_index(e: JVal) -> Int {
+    let mut a: Int = member_index(e, "key");
+    if a < 0 { a = member_index(e, "Key"); }
+    if a < 0 { a = member_index(e, "name"); }
+    if a < 0 { a = member_index(e, "Name"); }
+    return a;
+}
+fn entry_value_index(e: JVal) -> Int {
+    let mut a: Int = member_index(e, "value");
+    if a < 0 { a = member_index(e, "Value"); }
+    return a;
+}
+// The key must be a string and the value may be absent, and both halves were
+// wrong: an entry that kept its key and lost its value answered nothing at all,
+// which is the shape walk(f) hands here when a child answers empty.
 pub fn builtin_from_entries(doc: JDoc, idx: Int) -> Result[SRes, String] {
     let v: JVal = jval_at(doc, idx);
     if v.kind != "array" {
         return Err("from_entries needs an array, not a " + v.kind);
     }
+    let mut live: JDoc = doc;
     let mut keys: List[String] = list_new();
     let mut kids: List[Int] = list_new();
     let mut i: Int = 0;
     while i < list_len(v.kids) {
-        let e: JVal = jval_at(doc, list_get(v.kids, i));
-        if e.kind != "object" {
-            return Err("from_entries needs an array of objects");
+        let e: JVal = jval_at(live, list_get(v.kids, i));
+        // jq reads .key off the element rather than refusing a non-object, so the
+        // refusal it gives is an indexing one, and it is matched here.
+        if e.kind != "object" { return Err("Cannot index " + kind_word(e.kind) + " with string \"key\""); }
+        let at: Int = entry_key_index(e);
+        if at < 0 { return Err("Cannot use null (null) as object key"); }
+        let kid: Int = list_get(e.kids, at);
+        let kv: JVal = jval_at(live, kid);
+        if kv.kind != "string" {
+            return Err("Cannot use " + kind_word(kv.kind) + " (" + shown_value(live, kid) + ") as object key");
         }
-        let name: String = member_text(doc, e, "key");
-        keys = list_push(keys, name);
-        kids = list_push(kids, member_child(e, "value"));
+        keys = list_push(keys, kv.sval);
+        let slot: Int = entry_value_index(e);
+        if slot < 0 {
+            let nil: SRes = null_result(live);
+            live = nil.doc;
+            kids = list_push(kids, list_get(nil.out, 0));
+        } else {
+            kids = list_push(kids, list_get(e.kids, slot));
+        }
         i = i + 1;
     }
-    let obj: SRes = object_result(doc, keys, kids);
+    let obj: SRes = object_result(live, keys, kids);
     return Ok(obj);
 }
 

@@ -14,14 +14,31 @@ import "parse/anchor.oo";
 import "filter/select_node.oo";
 import "filter/syntax/scan/parse_span.oo";
 import "render/render_value.oo";
+import "filter/eval/float_op.oo";
 import "std/core/primitives/str.oo";
 import "std/core/text/regex.oo";
 
-// has reports whether an object carries a member. jq refuses has on an array
-// outright, because an array index is a number and a member name is a string.
-pub fn builtin_has(doc: JDoc, idx: Int, key: String) -> Result[SRes, String] {
+// has asks one question with two answers depending on the shape: an OBJECT is
+// asked whether it carries a member, and a member name is a string; an ARRAY is
+// asked whether it carries a POSITION, and a position is a number. A null
+// carries nothing and so is false for every key -- even for the key kinds that
+// would otherwise be refused, because there is no shape left to ask about.
+//
+// The array test is `0 <= n < length` with n truncated toward zero. For an
+// integer length that collapses to `n > -1 and n < length`: trunc(n) >= 0 is
+// true exactly when n > -1, and trunc(n) < len is true exactly when n < len.
+// Nothing has to be truncated, so a float key is answered by two exact
+// comparisons and not by a rounding this build has no way to take. Measured on
+// [1,2]: 0, 0.5, 1.5 and -0.5 are all true and 2.5 and -1 are both false, and
+// -0.5 being true is what shows the test is not 0 <= n.
+pub fn builtin_has(doc: JDoc, idx: Int, key: String, arg: Int) -> Result[SRes, String] {
     let v: JVal = jval_at(doc, idx);
+    let k: JVal = jval_at(doc, arg);
+    if v.kind == "null" { return Ok(bool_result(doc, false)); }
     if v.kind == "object" {
+        if k.kind != "string" {
+            return Err("Cannot check whether object has a " + kind_word(k.kind) + " key");
+        }
         let mut i: Int = 0;
         while i < list_len(v.keys) {
             if list_get(v.keys, i) == key {
@@ -31,16 +48,47 @@ pub fn builtin_has(doc: JDoc, idx: Int, key: String) -> Result[SRes, String] {
         }
         return Ok(bool_result(doc, false));
     }
-    return Err("has needs an object, not a " + v.kind);
+    if v.kind == "array" {
+        let n: Int = list_len(v.kids);
+        if k.kind == "int" { return Ok(bool_result(doc, k.ival > 0 - 1 && k.ival < n)); }
+        if k.kind == "float" {
+            // A float key is ruled on by two exact comparisons rather than by a
+            // rounding this build has no way to take, and a refusal to read the
+            // key at all is carried out rather than swallowed: a key this page
+            // cannot read is a key it cannot rule on.
+            let lo: Result[Int, String] = float_order(k, jval_int(0 - 1));
+            match lo {
+                Err(e) => { return Err(e); }
+                Ok(c) => {
+                    let under: Bool = c < 0;
+                    if under { return Ok(bool_result(doc, false)); }
+                    let hi: Result[Int, String] = float_order(k, jval_int(n));
+                    match hi {
+                        Err(f) => { return Err(f); }
+                        Ok(d) => {
+                            let inside: Bool = d < 0;
+                            return Ok(bool_result(doc, inside));
+                        }
+                    }
+                }
+            }
+        }
+        return Err("Cannot check whether array has a " + kind_word(k.kind) + " key");
+    }
+    // jq names the kind of the container and the kind of the key in the same
+    // sentence, and both go through kind_word, so `1 | has("a")` is a number and
+    // `true | has(0)` is a boolean rather than the two internal names.
+    return Err("Cannot check whether " + kind_word(v.kind) + " has a " + kind_word(k.kind) + " key");
 }
 
-// range(n) emits each value as its own output rather than collecting an array,
-// which is what jq does. Wrapping it in brackets is the caller's job.
+// range(n) emits each value as its own output rather than collecting an array.
 pub fn builtin_range(doc: JDoc, n: Int) -> SRes {
     let mut live: JDoc = doc;
     let mut out: List[Int] = list_new();
+    let mut limit: Int = n;
+    if limit > 100000 { limit = 100000; }
     let mut i: Int = 0;
-    while i < n {
+    while i < limit {
         let p: PRes = jdoc_push(live, jval_int(i));
         live = p.doc;
         out = list_push(out, p.idx);
@@ -62,35 +110,10 @@ pub fn builtin_endswith(doc: JDoc, idx: Int, suf: String) -> Result[SRes, String
     return Ok(bool_result(doc, suf == tail));
 }
 
-// contains is jq's subsequence test for strings and a subset test for arrays.
-pub fn builtin_contains(doc: JDoc, idx: Int, needle: String) -> Result[SRes, String] {
-    let v: JVal = jval_at(doc, idx);
-    if v.kind == "string" {
-        let hay: String = v.sval;
-        let n: Int = chars_len(hay);
-        let m: Int = chars_len(needle);
-        if m == 0 { return Ok(bool_result(doc, true)); }
-        let mut i: Int = 0;
-        while i + m <= n {
-            if str_slice(hay, i, i + m) == needle {
-                return Ok(bool_result(doc, true));
-            }
-            i = i + 1;
-        }
-        return Ok(bool_result(doc, false));
-    }
-    if v.kind == "array" {
-        let mut i: Int = 0;
-        while i < list_len(v.kids) {
-            let e: JVal = jval_at(doc, list_get(v.kids, i));
-            if e.kind == "string" && e.sval == needle {
-                return Ok(bool_result(doc, true));
-            }
-            i = i + 1;
-        }
-    }
-    return Ok(bool_result(doc, false));
-}
+// contains is not here: it is a subset test over values, so it lives beside
+// values_equal on the comparison page. It was here as a string search with an
+// array fallback that answered false, which made {"a":1} | contains("a") answer
+// false where jq refuses, and 1 | contains(1) answer false where jq is true.
 
 fn str_of(doc: JDoc, idx: Int) -> String {
     let v: JVal = jval_at(doc, idx);

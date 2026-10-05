@@ -10,7 +10,12 @@
 
 import "filter/select_node.oo";
 import "filter/builtin/anchor.oo";
+import "filter/builtin/find/find_index.oo";
+import "filter/builtin/date/strftime.oo";
+import "filter/builtin/date/strptime.oo";
 import "filter/eval/leaf/leaf_step.oo";
+import "filter/eval/leaf/operand_guard.oo";
+import "filter/eval/eval_cmp.oo";
 import "filter/run/eval_suggest.oo";
 import "filter/run/eval_sort.oo";
 import "filter/run/eval_path.oo";
@@ -30,14 +35,14 @@ fn arg_text(doc: JDoc, arg: Int) -> String {
 fn needs_literal(name: String) -> Bool {
     return name == "has" || name == "join" || name == "startswith" || name == "endswith"
         || name == "contains" || name == "ltrimstr" || name == "test" || name == "range"
-        || name == "flatten" || name == "index" || name == "rindex"
-        || name == "split" || name == "rtrimstr" || name == "error";
+        || name == "flatten" || name == "index" || name == "rindex" || name == "indices"
+        || name == "split" || name == "rtrimstr" || name == "error" || name == "strftime" || name == "strptime";
 }
 
 fn requires_arg(name: String) -> Bool {
     return name == "has" || name == "join" || name == "startswith" || name == "endswith"
         || name == "contains" || name == "ltrimstr" || name == "test" || name == "range"
-        || name == "split" || name == "rtrimstr" || name == "getpath";
+        || name == "split" || name == "rtrimstr" || name == "getpath" || name == "strftime" || name == "strptime";
 }
 
 // The builtins the hub answers off its own list, because reading their argument
@@ -46,6 +51,11 @@ fn requires_arg(name: String) -> Bool {
 pub fn is_routed(builtin: String) -> Bool {
     if builtin == "paths" { return true; }
     if builtin == "leaf_paths" { return true; }
+    // add is routed only so that it can be REFUSED when it carries a filter. The
+    // argument used to be dropped on the floor and the members summed instead,
+    // which is a different number rather than a different shape: [1,2] | add(.)
+    // is [1,2] in jq and was 3 here.
+    if builtin == "add" { return true; }
     if builtin == "sort" { return true; }
     if builtin == "unique" { return true; }
     if builtin == "path" || builtin == "del" { return true; }
@@ -58,6 +68,15 @@ pub fn route_builtin(doc: JDoc, input: List[Int], builtin: String, body: String)
     if builtin == "sort" { return sort_over(doc, input); }
     if builtin == "unique" { return unique_over(doc, input); }
     if builtin == "range" { return range_over(doc, body); }
+    // add(f) is rewritten while the filter is READ, as [f] | add, so a body that
+    // reaches here means the rewrite did not fire. Falling through to the bare
+    // add instead would sum the MEMBERS, which is a different number rather than
+    // a different shape: [1,2,3]|add(.) is [1,2,3] in jq and would be 6 here. So
+    // this is a backstop for the rewrite, not the rule itself, and it says so
+    // rather than claiming add(f) is unimplemented.
+    if builtin == "add" && chars_len(body) > 0 {
+        return Err("\"add\" with a filter is refused here because the parse-time rewrite to [filter] | add did not fire, and summing the members instead of the filter's answers would be a different number");
+    }
     if builtin == "path" || builtin == "del" { return path_builtin(doc, input, builtin, body); }
     return run_leaf(doc, input, builtin, 0 - 1);
 }
@@ -70,18 +89,44 @@ fn one_step_arg(doc: JDoc, here: Int, w: String, t: String, arg: Int) -> Result[
         if arg < 0 { return builtin_error(doc, here); }
         return builtin_error(doc, arg);
     }
-    if w == "has" { return builtin_has(doc, here, t); }
-    if w == "join" { return builtin_join(doc, here, t); }
+    // Nine of the builtins below read a string out of the argument, and jq has no
+    // zero argument form of any of them: "abc" | index is a compile error there.
+    // Here it reached the walk with no argument and answered null, which is a
+    // wrong answer rather than a missing one, so the name is refused instead.
+    if arg < 0 {
+        if w == "index" || w == "rindex" || w == "indices" || w == "split"
+            || w == "startswith" || w == "endswith" || w == "ltrimstr" || w == "rtrimstr" || w == "test" {
+            return Err("\"" + w + "\" needs a literal argument");
+        }
+    }
+    // Every operation below reads its operand as a string, and jq refuses a pair
+    // of kinds it cannot read rather than coercing one into the other. That was
+    // a family of wrong answers and not a family of gaps: "abc" | index(1) is
+    // "Cannot index string with number" and is not null, null | startswith("a")
+    // is "startswith() requires string inputs" and is not false, and
+    // [1] | test("a") is refused rather than false. run_leaf checks the first
+    // value of the input so that the refusal is jq's sentence rather than the
+    // generic one; this second check is per value, so a later one in a generator
+    // is still caught where the first was not.
+    if arg >= 0 {
+        let bad: String = operand_refusal(doc, w, here, arg);
+        if bad != "" { return Err(bad); }
+    }
+    if w == "has" { return builtin_has(doc, here, t, arg); }
+    if w == "join" { return builtin_join(doc, here, arg); }
     if w == "startswith" { return builtin_startswith(doc, here, t); }
     if w == "endswith" { return builtin_endswith(doc, here, t); }
-    if w == "contains" { return builtin_contains(doc, here, t); }
+    if w == "contains" { return builtin_contains(doc, here, arg); }
     if w == "ltrimstr" { return builtin_ltrimstr(doc, here, t); }
     if w == "test" { return builtin_test(doc, here, t); }
     if w == "flatten" { return builtin_flatten(doc, here, t); }
-    if w == "index" { return builtin_index(doc, here, t); }
-    if w == "rindex" { return builtin_rindex(doc, here, t); }
+    if w == "index" { return builtin_index(doc, here, t, arg); }
+    if w == "rindex" { return builtin_rindex(doc, here, t, arg); }
+    if w == "indices" { return builtin_indices(doc, here, t, arg); }
     if w == "split" { return builtin_split(doc, here, t); }
     if w == "rtrimstr" { return builtin_rtrimstr(doc, here, t); }
+    if w == "strftime" { return builtin_strftime(doc, here, arg); }
+    if w == "strptime" { return builtin_strptime(doc, here, arg); }
     return Err("unknown builtin \"" + w + "\"");
 }
 
@@ -111,6 +156,21 @@ fn walk(doc: JDoc, input: List[Int], w: String, t: String, arg: Int) -> Result[S
 // text as "none given" refused them. An argument that is not a scalar is a
 // different thing again, and is refused rather than read as an empty one,
 // because contains(["x"]) must not quietly become contains("").
+// The four builtins whose argument is a VALUE rather than a string: a path is
+// data, a message is any value at all, and containment and position are both
+// asked of a value. Reading the others as text is what makes join(1) refuse
+// rather than answer, which is the point.
+//
+// `has` and `join` join them for a different reason: `has` is told which kind
+// of key it was handed, and `join` adds its separator as a value rather than as
+// text, so [1,2,3] | has([1]) is "Cannot check whether array has a array key"
+// and ["a","b"] | join([1]) is "string (\"a\") and array ([1]) cannot be added"
+// rather than either generic sentence. Both refuse; this is about which one
+// names the value.
+fn takes_any_value(name: String) -> Bool {
+    return name == "getpath" || name == "error" || name == "contains" || name == "index" || name == "rindex" || name == "indices" || name == "has" || name == "join";
+}
+
 pub fn run_leaf(doc: JDoc, input: List[Int], name: String, arg: Int) -> Result[SRes, String] {
     // The name is checked before the argument, because a name this build has
     // never heard of is the more useful thing to say. Reporting the argument
@@ -122,17 +182,26 @@ pub fn run_leaf(doc: JDoc, input: List[Int], name: String, arg: Int) -> Result[S
         return walk(doc, input, name, "", arg);
     }
     let v: JVal = jval_at(doc, arg);
+    // The kind check comes before the generic scalar check below, because for
+    // these builtins jq names the operation rather than saying "needs a scalar
+    // literal argument": "abc" | startswith(null) is "startswith() requires
+    // string inputs" in both, and the generic sentence is the less useful of
+    // the two. Both refuse, so this is about which refusal, not about whether.
+    if list_len(input) > 0 {
+        let bad: String = operand_refusal(doc, name, list_get(input, 0), arg);
+        if bad != "" { return Err(bad); }
+    }
     // getpath and error are the two builtins whose argument may be a container,
     // because a path is data and a message is any value at all. Everything else
     // still refuses a non scalar, so that contains(["x"]) cannot be read as
     // contains("").
     if v.kind == "array" {
-        if name != "getpath" && name != "error" {
+        if !takes_any_value(name) {
             return Err("\"" + name + "\" needs a scalar literal argument");
         }
         return walk(doc, input, name, "", arg);
     }
-    if v.kind != "string" && v.kind != "int" && v.kind != "float" {
+    if !takes_any_value(name) && v.kind != "string" && v.kind != "int" && v.kind != "float" {
         return Err("\"" + name + "\" needs a scalar literal argument");
     }
     let t: String = arg_text(doc, arg);

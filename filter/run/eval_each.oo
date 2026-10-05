@@ -39,6 +39,9 @@ pub fn empty_arrays(doc: JDoc, count: Int) -> SRes {
 // live in gather, on the one page that cannot grow, and it was refused as
 // unbuildable for a long time. It is not a new loop at all: per_member's map
 // mode already walks values one at a time and gathers each one's answers, and
-// this page had no say in which one it was pointed at. The whole of that
-// function now lives in eval_run.oo as a mode, so nothing is left here but the
 // empty collect.
+
+pub fn is_single_arg(name: String) -> Bool {
+    return name == "index" || name == "rindex" || name == "indices" || name == "contains" || name == "error" || name == "strftime" || name == "strptime";
+}
+

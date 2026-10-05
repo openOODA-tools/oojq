@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Source: https://github.com/openOODA-tools/oojq
+
+Files: *
+Copyright: 2026 openOODA-tools
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0. See the LICENSE file
+ in the source tree for the full text.

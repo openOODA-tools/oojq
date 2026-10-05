@@ -14,7 +14,7 @@ type Civ = struct {
     d: Int
 };
 
-fn cd_floor_div(a: Int, b: Int) -> Int {
+pub fn cd_floor_div(a: Int, b: Int) -> Int {
     let mut q: Int = a / b;
     let r: Int = a % b;
     if r != 0 {

@@ -132,6 +132,11 @@ pub fn find_kw(c: Cur, w: String) -> Int {
             i = i + 1;
         } else if depth == 0 && nest == 0 && word_at(c, i, w) {
             return i;
+        } else if depth == 0 && word_at(c, i, "elif") {
+            // cur_word checks the character AFTER a word and never the one before,
+            // so the "if" at the tail of elif matches at its own position. Without
+            // this the elif counts as a nested if and the real end closes that one.
+            i = i + 4;
         } else if depth == 0 && word_at(c, i, "if") {
             nest = nest + 1;
             i = i + 1;
@@ -171,20 +176,23 @@ fn parse_if_body(c: Cur, ast: AList) -> Result[POut, String] {
     let mut ac: Cur = cur_skip(cur_step(c, tpos - c.pos + 4));
     let epos: Int = find_any_kw(ac, "elif", "else", "end");
     if epos < 0 {
-        return Err("if without end");
+        return Err("if without end, and without an elif or an else");
     }
     let th: String = trim_ws(str_slice(ac.src, ac.pos, epos));
     let endp: Int = find_kw(ac, "end");
     if endp < 0 {
-        return Err("if without end");
+        return Err("if without end after branch [" + th + "] ac=" + ac.pos.to_string() + " epos=" + epos.to_string());
     }
     let mut n: ANode = node_blank("ifthen");
     n.sval = cond;
     n.t1 = th;
     n.name = "if";
     if word_at(ac, epos, "elif") {
+        // The end belongs to the elif chain, so the nested if is written closed
+        // rather than left to borrow the outer one: "elif C then D" alone is a
+        // filter that does not parse.
         let rest: String = trim_ws(str_slice(ac.src, epos + 4, endp));
-        n.t2 = "if " + rest;
+        n.t2 = "if " + rest + " end";
         n.name = "ifelse";
     } else if word_at(ac, epos, "else") {
         let rest: String = trim_ws(str_slice(ac.src, epos + 4, endp));

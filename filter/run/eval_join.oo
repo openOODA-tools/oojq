@@ -10,7 +10,33 @@
 
 import "filter/select_node.oo";
 import "filter/eval/eval_leaf.oo";
+import "filter/eval/eval_op.oo";
 import "filter/ast.oo";
+
+// The evaluator reads the two sides of an operator and hands them over, so the
+// pairing lives here beside the operator that does the work. It walks the right
+// hand side because an operator pairs each right value with every left value,
+// and it threads the arena through each step because a pair can mint.
+pub fn pair_all(live: JDoc, n: ANode, rights: List[Int], lefts: List[Int]) -> Result[SRes, String] {
+    let mut grown: JDoc = live;
+    let mut out: List[Int] = list_new();
+    let mut j: Int = 0;
+    while j < list_len(rights) {
+        let seed: SRes = SRes { doc: grown, out: list_new() };
+        match append_pairs(seed, n.name, list_get(rights, j), lefts) {
+            Err(e) => { return Err(e); }
+            Ok(v) => {
+                grown = v.doc;
+                if list_len(out) + list_len(v.out) > 100000 {
+                    return Err("stream size limit exceeded (100000 items)");
+                }
+                out = concat_indices(out, v.out);
+            }
+        }
+        j = j + 1;
+    }
+    return Ok(SRes { doc: grown, out: out });
+}
 
 pub fn keeps(doc: JDoc, out: List[Int]) -> Bool {
     let mut i: Int = 0;
@@ -40,7 +66,12 @@ pub fn side_input(kind: String, doc: JDoc, got: List[Int], input: List[Int]) -> 
 
 pub fn combine_sides(doc: JDoc, kind: String, left: List[Int], right: List[Int]) -> Result[SRes, String] {
     if kind == "pipe" { return Ok(SRes { doc: doc, out: right }); }
-    if kind == "comma" { return Ok(SRes { doc: doc, out: concat_indices(left, right) }); }
+    if kind == "comma" {
+        if list_len(left) + list_len(right) > 100000 {
+            return Err("stream size limit exceeded (100000 items)");
+        }
+        return Ok(SRes { doc: doc, out: concat_indices(left, right) });
+    }
     if kind == "alt" {
         let mut keep: List[Int] = list_new();
         let mut i: Int = 0;
@@ -61,6 +92,9 @@ pub fn combine_sides(doc: JDoc, kind: String, left: List[Int], right: List[Int])
         let a: Bool = truthy(jval_at(doc, list_get(left, i)));
         let mut j: Int = 0;
         while j < list_len(right) {
+            if list_len(out) >= 100000 {
+                return Err("stream size limit exceeded (100000 items)");
+            }
             let b: Bool = truthy(jval_at(doc, list_get(right, j)));
             let answer: Bool = both(want, a, b);
             let res: SRes = bool_result(live, answer);

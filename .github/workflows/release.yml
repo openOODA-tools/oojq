@@ -1,0 +1,126 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oojq
+
+      - uses: actions/checkout@v4
+        with:
+          repository: openOODA/oodac
+          path: oodac
+
+      - uses: actions/checkout@v4
+        with:
+          repository: openOODA/oodar
+          path: oodar
+
+      - uses: actions/checkout@v4
+        with:
+          repository: openOODA/std
+          path: std
+
+      - name: Require compiler and clang
+        working-directory: ${{ github.workspace }}
+        run: |
+          test -x oodac/bin/oodac || chmod +x oodac/bin/oodac
+          if ! command -v clang >/dev/null; then sudo apt-get update && sudo apt-get install -y clang; fi
+          command -v clang >/dev/null || { echo "clang required for oodac build (LLVM IR + oodar)"; exit 1; }
+
+      - name: Build oodar libs
+        working-directory: ${{ github.workspace }}
+        run: make -C oodar/scripts -f Makefile modular
+
+      - name: Build, verify, and test
+        working-directory: ${{ github.workspace }}/oojq
+        env:
+          OODA_COMPILER: ${{ github.workspace }}/oodac/bin/oodac
+          OODA_FS_READDIR: ${{ github.workspace }}
+          OODA_FS_WRITEDIR: ${{ github.workspace }}
+        run: make all test
+
+      - name: Stage release asset
+        working-directory: ${{ github.workspace }}
+        run: |
+          cp oojq/dist/oojq oojq-linux-x86_64
+          sha256sum oojq-linux-x86_64 > oojq-linux-x86_64.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oojq-linux-x86_64
+          path: |
+            oojq-linux-x86_64
+            oojq-linux-x86_64.sha256
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oojq
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oojq-linux-x86_64
+          path: ${{ github.workspace }}/dist
+
+      - name: Build .deb
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq debhelper build-essential
+          cp -r oojq/packaging/debian oojq/debian
+          cd oojq && dpkg-buildpackage -us -uc -b
+          ls ../*.deb
+
+      - name: Build .rpm
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo apt-get install -y -qq rpm
+          mkdir -p ~/rpmbuild/SOURCES ~/rpmbuild/SPECS ~/rpmbuild/RPMS
+          cp dist/oojq-linux-x86_64 ~/rpmbuild/SOURCES/
+          sed "s/^Version:.*/Version: ${GITHUB_REF_NAME#v}/" oojq/packaging/oojq.spec > ~/rpmbuild/SPECS/oojq.spec
+          rpmbuild -bb ~/rpmbuild/SPECS/oojq.spec
+          cp ~/rpmbuild/RPMS/x86_64/*.rpm .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oojq-packages
+          path: |
+            ${{ github.workspace }}/*.deb
+            ${{ github.workspace }}/*.rpm
+
+  publish:
+    needs: [build, package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ github.workspace }}/assets
+
+      - name: Create GitHub release
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          find assets -type f | sort
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "oojq ${GITHUB_REF_NAME}" \
+            --notes "oojq ${GITHUB_REF_NAME}: Capability-bounded jq replacement with 98% jq parity, exact arithmetic, and an agent-native MCP server over stdio. 100% openOODA. Install: curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash" \
+            assets/oojq-linux-x86_64/oojq-linux-x86_64 \
+            assets/oojq-linux-x86_64/oojq-linux-x86_64.sha256 \
+            assets/oojq-packages/*.deb \
+            assets/oojq-packages/*.rpm

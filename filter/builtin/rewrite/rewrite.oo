@@ -1,13 +1,16 @@
 // # The Builtins A Rewrite Names
 //
-// Logline: Answers the two calls the parser builds out of a written object and a written setpath, which is where the run hands over.
+// Logline: Answers the two calls the parser builds out of a written object and a written setpath, and rewrites recurse's two-argument form and map_values into filter text this evaluator already runs.
 //
-// Setup: Pure, no capability needed. Both arrive with their parts already gathered, so neither reaches back into the evaluator for anything.
+// Setup: Pure, no capability needed. The first two arrive with their parts already gathered, so neither reaches back into the evaluator for anything; the last two are text the run evaluates in place.
 // Beats:
 //   1. Build an object out of the entries the parser gathered, one per combination.
 //   2. Set a path, keeping a member's place and appending one that was not there.
+//   3. Fold recurse's two arguments into the one filter the evaluator walks with.
+//   4. Write map_values as the per-member update that keeps a shape and drops an empty member.
 
 import "filter/select_node.oo";
+import "filter/ast.oo";
 import "filter/builtin/object/builtin_object.oo";
 import "filter/builtin/path/setpath.oo";
 import "filter/builtin/path/update.oo";
@@ -49,4 +52,124 @@ pub fn written_builtin(doc: JDoc, input: List[Int], name: String, body: Int) -> 
     }
     if name == "__obj" { return builtin_object(doc, body); }
     return Err("unknown builtin \"" + name + "\"");
+}
+
+// map_values(f) is the FIRST answer of f at every member, keeping the shape it was
+// given: a member that answers nothing is dropped, and one that answers twice keeps
+// its first. That is what |= does per member and what map does NOT do — map gathers
+// every answer, so `[1,2] | map_values(1,2)` is `[1,1]` where `[1,2] | map(1,2)` is
+// `[1,2,1,2]`, so writing this as map(f) would be a plausible wrong answer rather
+// than a refusal.
+//
+// Both shapes go the same way: write the members out as entries, update .value,
+// and read them back. That is the only route here to "first answer, dropped on
+// empty" over an array and an object alike, and |='s cut-on-empty is the drop. The
+// body is parenthesised where it is spliced in, or a body carrying a top-level comma
+// or // changes the shape of the text around it instead of being run by it.
+//
+// The result is a paren node, whose sval the run evaluates as text. A rewrite
+// written as text costs the evaluator nothing, the same bargain recurse(f; cond)
+// and walk both took, and it is why this needs no line in the hub.
+pub fn rewrite_map_values(c: Cur, t: Tok, added: ARes) -> Result[POut, String] {
+    let body: String = trim_ws(ast_at(added.ast, added.idx).sval);
+    if chars_len(body) == 0 {
+        return Err("map_values needs a filter argument, as in map_values(.+1)");
+    }
+    let cut: String = "to_entries | map(.value |= (" + body + ")) | map(select(has(\"value\")))";
+    let mut made: ANode = n_pair("paren", 0 - 1, 0 - 1);
+    made.sval = "if type == \"array\" then (" + cut + " | map(.value)) else (" + cut + " | from_entries) end";
+    let add: ARes = ast_add(added.ast, made);
+    return Ok(POut { ast: add.ast, cur: Cur { src: c.src, pos: t.pos }, node: add.idx });
+}
+
+// add(f) is [f] | add, and that is jq's own definition rather than a
+// resemblance: the filter runs ONCE over the whole input and every answer it
+// gives is summed. Measured against jq 1.8.1, [1,2,3]|add(.) is [1,2,3] where
+// summing the members is 6, add(.[0], .[1]) is 3 because a top-level comma is one
+// argument holding a generator, add(.,.) is add/2 and does not exist, add(.[]) is
+// 6 because the collect then holds the three members, and add(empty) is null
+// because an empty collect is an empty array.
+//
+// Both halves were already paid for, so this costs the evaluator nothing: a
+// collect already walks the body, and the bare add already sums an array. The
+// body goes inside the brackets, which is what makes a top-level comma and a
+// top-level | mean the same here as they do in a collect, so neither has to be
+// parenthesised to survive the splice.
+//
+// A semicolon is the one body that must be refused rather than collected,
+// because it is the one that jq reads as a SECOND ARGUMENT and answers
+// "add/2 is not defined" to. A body carrying one is refused by name here rather
+// than collected into [a;b] and summed, which would be a plausible wrong answer
+// rather than a refusal.
+pub fn rewrite_add(c: Cur, t: Tok, added: ARes) -> Result[POut, String] {
+    let body: String = trim_ws(ast_at(added.ast, added.idx).sval);
+    if semi_at_top(body) >= 0 {
+        return Err("\"add\" takes one filter, as in add(.+1); jq has no add/2, and a semicolon in the body is a second argument");
+    }
+    let mut made: ANode = n_pair("paren", 0 - 1, 0 - 1);
+    made.sval = "[" + body + "] | add";
+    let add: ARes = ast_add(added.ast, made);
+    return Ok(POut { ast: add.ast, cur: Cur { src: c.src, pos: t.pos }, node: add.idx });
+}
+
+// with_entries(f) is to_entries | map(f) | from_entries, and that is not a
+// resemblance: checked against jq 1.8.1 on a value update, a key update, and a
+// select, the two spellings are byte identical, and an array answers the same
+// "Cannot use number (0) as object key" refusal through both, because the index
+// is a number and from_entries will not make it a name.
+pub fn rewrite_entries(c: Cur, t: Tok, added: ARes) -> Result[POut, String] {
+    let body: String = ast_at(added.ast, added.idx).sval;
+    let a1: ARes = ast_add(added.ast, n_func("to_entries"));
+    let mut mapped: ANode = n_func("map");
+    mapped.sval = body;
+    let a2: ARes = ast_add(a1.ast, mapped);
+    let a3: ARes = ast_add(a2.ast, n_pair("pipe", a1.idx, a2.idx));
+    let a4: ARes = ast_add(a3.ast, n_func("from_entries"));
+    let a5: ARes = ast_add(a4.ast, n_pair("pipe", a3.idx, a4.idx));
+    return Ok(POut { ast: a5.ast, cur: Cur { src: c.src, pos: t.pos }, node: a5.idx });
+}
+
+// recurse(f; cond) is recurse(f | select(cond)), and that is measured rather than
+// assumed: 1|recurse(.*2; . < 20) and 1|recurse(.*2 | select(. < 20)) both answer
+// [1,2,4,8,16]. So the two-argument form needs no code of its own in the
+// evaluator, only a rewrite of the text it was handed. A body with no semicolon,
+// or one whose halves are empty, is left exactly as written, because a refused
+// split would answer something the reader did not ask for.
+pub fn recurse_body(body: String) -> String {
+    let cut: Int = semi_at_top(body);
+    if cut < 0 { return body; }
+    let left: String = trim_ws(str_slice(body, 0, cut));
+    let whole: Int = chars_len(body);
+    let right: String = trim_ws(str_slice(body, cut + 1, whole));
+    if chars_len(left) == 0 || chars_len(right) == 0 { return body; }
+    return left + " | select(" + right + ")";
+}
+
+// The first semicolon that is not inside a group and not inside a string. A
+// semicolon in .[0:2] or in a written "a;b" belongs to one argument, and
+// splitting there would hand the evaluator two halves of a filter. A backslash
+// inside a string skips the next character, so an escaped quote does not look
+// like the end of the string.
+fn semi_at_top(s: String) -> Int {
+    let n: Int = chars_len(s);
+    let mut depth: Int = 0;
+    let mut quote: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(s, i);
+        if chars_len(quote) > 0 {
+            if ch == "\\" { i = i + 1; }
+            else if ch == quote { quote = ""; }
+        } else if ch == "\"" {
+            quote = ch;
+        } else if ch == "(" || ch == "[" || ch == "{" {
+            depth = depth + 1;
+        } else if ch == ")" || ch == "]" || ch == "}" {
+            depth = depth - 1;
+        } else if ch == ";" && depth == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
 }

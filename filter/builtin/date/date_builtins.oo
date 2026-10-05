@@ -17,7 +17,7 @@ import "std/core/primitives/str.oo";
 // A whole number of seconds. A float is truncated, which is what todate does
 // anyway (1500000000.7 is 2017-07-14T02:40:00Z in jq) and what keeps one rule
 // for every builtin here.
-fn db_epoch(v: JVal, why: String) -> Result[Int, String] {
+pub fn db_epoch(v: JVal, why: String) -> Result[Int, String] {
     if !is_number_kind(v.kind) { return Err(why); }
     let n: Result[Num, String] = num_of(v);
     match n {

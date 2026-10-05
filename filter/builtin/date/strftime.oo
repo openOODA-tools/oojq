@@ -1,0 +1,256 @@
+// # strftime
+//
+// Logline: Writes a broken-down UTC datetime as text through jq's strftime, one percent code at a time, with the composites expanded instead of spelled out twice.
+// Setup: Pure, no capability needed. civil_days.oo owns the calendar arithmetic; this page owns the mapping from a code to text, and refuses the one code it cannot answer.
+// Beats:
+//   1. Read the eight slot array, or a number of seconds, and normalize it the way a C struct tm normalizes: a month, day, or clock out of range rolls into its neighbours.
+//   2. Every base code, plus the eight composites, which go back on the format queue so %c and %F are each defined once.
+//   3. Refuse %s, which jq answers in the local timezone and this build cannot know.
+
+import "parse/value_tree.oo";
+import "filter/select_node.oo";
+import "filter/builtin/date/civil_days.oo";
+import "filter/builtin/date/date_builtins.oo";
+
+// Everything a single code needs, read out of the input once so that no code
+// has to walk back to the value it came from.
+type Parts = struct {
+    y: Int,
+    mo: Int,
+    d: Int,
+    sod: Int,
+    wday: Int,
+    yday: Int,
+    iso: Int,
+    wk: Int
+};
+
+// Slot zero is the year and is a whole year, not years since 1900: jq hands
+// 1900-less to a struct tm and glibc adds it straight back. A slot that is not
+// there is the zero of a struct that was memset, which is why [] is 1899-12-31
+// and not an error: the year is 1900, the month is January, and the day is the
+// day before the first.
+fn sf_six(doc: JDoc, v: JVal) -> Result[List[Int], String] {
+    let mut got: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 6 {
+        if i >= list_len(v.kids) { got = list_push(got, 0); i = i + 1; continue; }
+        let e: JVal = jval_at(doc, list_get(v.kids, i));
+        let r: Result[Int, String] = db_epoch(e, "strftime/1 requires parsed datetime inputs");
+        match r {
+            Err(e2) => { return Err(e2); }
+            Ok(k) => { got = list_push(got, k); }
+        }
+        i = i + 1;
+    }
+    return Ok(got);
+}
+
+fn sf_parts(doc: JDoc, v: JVal) -> Result[Parts, String] {
+    let mut days: Int = 0;
+    let mut sod: Int = 0;
+    if v.kind == "array" {
+        let got: Result[List[Int], String] = sf_six(doc, v);
+        match got {
+            Err(e) => { return Err(e); }
+            Ok(f) => {
+                let mut y: Int = list_get(f, 0);
+                if list_len(v.kids) == 0 { y = 1900; }
+                // civil_days takes a one based month and any day, so month 13
+                // and day 0 both come out right, and the clock is normalized
+                // separately because hour 25 is the next day at one o'clock
+                // rather than an hour that does not exist.
+                let clock: Int = list_get(f, 3) * 3600 + list_get(f, 4) * 60 + list_get(f, 5);
+                let cs: Split = split_day(clock);
+                days = civil_days(y, list_get(f, 1) + 1, list_get(f, 2)) + cs.days;
+                sod = cs.sod;
+            }
+        }
+    } else {
+        // A number is seconds since the epoch, the same reading gmtime takes,
+        // and it is already a whole instant, so it needs no normalizing after.
+        let t: Result[Int, String] = db_epoch(v, "strftime/1 requires parsed datetime inputs");
+        match t {
+            Err(e) => { return Err(e); }
+            Ok(sec) => {
+                let sp: Split = split_day(sec);
+                days = sp.days;
+                sod = sp.sod;
+            }
+        }
+    }
+    let civ: Civ = days_civil(days);
+    let wday: Int = day_weekday(days);
+    let mut isow: Int = wday;
+    if wday == 0 { isow = 7; }
+    // The ISO year is the year of the Thursday of this week, which is why
+    // 2016-01-01 is week 53 of 2015. The division floors, so the week of the
+    // Thursday of 1 January can come out negative and still be week 53 rather
+    // than week 1.
+    let th: Int = days + (4 - isow);
+    let thc: Civ = days_civil(th);
+    let wk: Int = cd_floor_div(th - civil_days(thc.y, 1, 1), 7) + 1;
+    return Ok(Parts { y: civ.y, mo: civ.m, d: civ.d, sod: sod, wday: wday,
+        yday: day_yday(civ.y, days), iso: thc.y, wk: wk });
+}
+
+fn sf_pad(n: Int, w: Int) -> String {
+    let mut s: String = (n).to_string();
+    while chars_len(s) < w { s = "0" + s; }
+    return s;
+}
+
+// %e pads the day with a space and everything else pads with a zero.
+fn sf_two(n: Int, pad: String) -> String {
+    if n < 10 { return pad + (n).to_string(); }
+    return (n).to_string();
+}
+
+// %y is the year inside the century and wraps, so year -1 is 99 and not -1.
+fn sf_y2(y: Int) -> String {
+    let mut r: Int = y % 100;
+    if r < 0 { r = r + 100; }
+    return sf_two(r, "0");
+}
+
+fn sf_h12(h: Int) -> Int {
+    let mut r: Int = h % 12;
+    if r == 0 { r = 12; }
+    return r;
+}
+fn sf_wday(w: Int, full: Bool) -> String {
+    if w == 0 { if full { return "Sunday"; } return "Sun"; }
+    if w == 1 { if full { return "Monday"; } return "Mon"; }
+    if w == 2 { if full { return "Tuesday"; } return "Tue"; }
+    if w == 3 { if full { return "Wednesday"; } return "Wed"; }
+    if w == 4 { if full { return "Thursday"; } return "Thu"; }
+    if w == 5 { if full { return "Friday"; } return "Fri"; }
+    if w == 6 { if full { return "Saturday"; } return "Sat"; }
+    return "";
+}
+
+fn sf_mon(m: Int, full: Bool) -> String {
+    if m == 1 { if full { return "January"; } return "Jan"; }
+    if m == 2 { if full { return "February"; } return "Feb"; }
+    if m == 3 { if full { return "March"; } return "Mar"; }
+    if m == 4 { if full { return "April"; } return "Apr"; }
+    if m == 5 { if full { return "May"; } return "May"; }
+    if m == 6 { if full { return "June"; } return "Jun"; }
+    if m == 7 { if full { return "July"; } return "Jul"; }
+    if m == 8 { if full { return "August"; } return "Aug"; }
+    if m == 9 { if full { return "September"; } return "Sep"; }
+    if m == 10 { if full { return "October"; } return "Oct"; }
+    if m == 11 { if full { return "November"; } return "Nov"; }
+    if m == 12 { if full { return "December"; } return "Dec"; }
+    return "";
+}
+
+// The eight composites, as the format text they stand for, so that %c and %F
+// are defined once and %c%c costs nothing. %X is %I:%M:%S %p and not %H:%M:%S,
+// which is jq's own spelling and is copied.
+fn sf_comp(c: String) -> String {
+    if c == "c" { return "%a %d %b %Y %I:%M:%S %p %Z"; }
+    if c == "D" { return "%m/%d/%y"; }
+    if c == "F" { return "%Y-%m-%d"; }
+    if c == "R" { return "%H:%M"; }
+    if c == "T" { return "%H:%M:%S"; }
+    if c == "r" { return "%I:%M:%S %p"; }
+    if c == "x" { return "%m/%d/%Y"; }
+    if c == "X" { return "%I:%M:%S %p"; }
+    return "";
+}
+
+fn sf_base(c: String, p: Parts) -> Result[String, String] {
+    if c == "Y" { return Ok((p.y).to_string()); }
+    if c == "y" { return Ok(sf_y2(p.y)); }
+    if c == "C" { return Ok((cd_floor_div(p.y, 100)).to_string()); }
+    if c == "m" { return Ok(sf_two(p.mo, "0")); }
+    if c == "d" { return Ok(sf_two(p.d, "0")); }
+    if c == "e" { return Ok(sf_two(p.d, " ")); }
+    if c == "j" { return Ok(sf_pad(p.yday + 1, 3)); }
+    if c == "H" { return Ok(sf_two(p.sod / 3600, "0")); }
+    if c == "I" { return Ok(sf_two(sf_h12(p.sod / 3600), "0")); }
+    if c == "M" { return Ok(sf_two((p.sod % 3600) / 60, "0")); }
+    if c == "S" { return Ok(sf_two(p.sod % 60, "0")); }
+    if c == "p" { if p.sod < 43200 { return Ok("AM"); } return Ok("PM"); }
+    if c == "a" { return Ok(sf_wday(p.wday, false)); }
+    if c == "A" { return Ok(sf_wday(p.wday, true)); }
+    if c == "b" { return Ok(sf_mon(p.mo, false)); }
+    if c == "B" { return Ok(sf_mon(p.mo, true)); }
+    if c == "u" { if p.wday == 0 { return Ok("7"); } return Ok((p.wday).to_string()); }
+    if c == "w" { return Ok((p.wday).to_string()); }
+    if c == "U" { return Ok(sf_two((p.yday + 7 - p.wday) / 7, "0")); }
+    if c == "W" { return Ok(sf_two((p.yday + 7 - ((p.wday + 6) % 7)) / 7, "0")); }
+    if c == "G" { return Ok((p.iso).to_string()); }
+    if c == "V" { return Ok(sf_two(p.wk, "0")); }
+    if c == "z" { return Ok("+0000"); }
+    if c == "Z" { return Ok("GMT"); }
+    if c == "n" { return Ok("\n"); }
+    if c == "t" { return Ok("\t"); }
+    // jq's %s is mktime of a wall clock, so it reads in the machine's own
+    // timezone and no single value is right: 1425601825 here, 1425533425 in
+    // Tokyo. The UTC epoch would be right for one machine out of all of them.
+    if c == "s" { return Err("strftime format code %s needs the local UTC offset, which this build cannot read"); }
+    return Ok("%" + c);
+}
+
+fn sf_format(fmt: String, p: Parts) -> Result[String, String] {
+    // A composite is replaced by pushing its spelling back on the queue behind
+    // the rest of the format, so the order of the output is the order of the
+    // input and %c inside a longer format does not jump the queue.
+    let mut q: List[String] = list_new();
+    let mut fi: Int = 0;
+    let mut out: String = "";
+    q = list_push(q, fmt);
+    while fi < list_len(q) {
+        let cur: String = list_get(q, fi);
+        fi = fi + 1;
+        let n: Int = chars_len(cur);
+        let mut i: Int = 0;
+        while i < n {
+            if char_at(cur, i) != "%" {
+                let mut j: Int = i;
+                while j < n && char_at(cur, j) != "%" { j = j + 1; }
+                out = out + str_slice(cur, i, j);
+                i = j;
+                continue;
+            }
+            // A % at the very end has nothing to introduce and stands for itself.
+            if i + 1 >= n { out = out + "%"; i = i + 1; continue; }
+            let c: String = char_at(cur, i + 1);
+            if c == "%" { out = out + "%"; i = i + 2; continue; }
+            let comp: String = sf_comp(c);
+            if comp != "" {
+                // The composite goes on ahead of the text that followed it,
+                // because the queue is read in the order it was filled.
+                q = list_push(q, comp);
+                if i + 2 < n { q = list_push(q, str_slice(cur, i + 2, n)); }
+                i = n;
+                continue;
+            }
+            let t: Result[String, String] = sf_base(c, p);
+            match t {
+                Err(e) => { return Err(e); }
+                Ok(s) => { out = out + s; }
+            }
+            i = i + 2;
+        }
+    }
+    return Ok(out);
+}
+
+pub fn builtin_strftime(doc: JDoc, idx: Int, arg: Int) -> Result[SRes, String] {
+    let fv: JVal = jval_at(doc, arg);
+    if fv.kind != "string" { return Err("strftime/1 requires a string format"); }
+    let p: Result[Parts, String] = sf_parts(doc, jval_at(doc, idx));
+    match p {
+        Err(e) => { return Err(e); }
+        Ok(pt) => {
+            let s: Result[String, String] = sf_format(fv.sval, pt);
+            match s {
+                Err(e2) => { return Err(e2); }
+                Ok(text) => { return Ok(str_result(doc, text)); }
+            }
+        }
+    }
+}

@@ -1,0 +1,27 @@
+// # The Composites jq Can Read Back
+//
+// Logline: The seven composite format codes jq expands when it parses, spelled out once so that the walk never has to know what %F stands for.
+// Setup: Pure, no capability needed. strftime.oo writes the same seven the same way, and the two tables are kept identical on purpose: a format that prints and then reads back should mean the same thing in both directions.
+// Beats:
+//   1. Six of the eight codes, each as the format text it stands for, so a composite inside a longer format is just a longer format.
+//   2. %x as %m/%d/%Y and not %m/%d/%y, which is the one place jq's reading and writing tables disagree.
+//   3. %c left out, because jq refuses it on every input measured and refusing it here is the same answer rather than a different one.
+
+// %c is deliberately absent. It is the eighth composite and strftime writes it,
+// but jq cannot read it back: seven different input shapes were tried, from the
+// one strftime itself produces to a bare date and a bare clock, and every one
+// of them came back "does not match format". Leaving the code unknown here is
+// what produces that same answer rather than a guess at one.
+// %D and %x look alike and are not. Both read "03/05/15", and %D answers 2015
+// because it is %m/%d/%y, while %x answers 15 because it is %m/%d/%Y. Measured,
+// and it is the only disagreement between jq's two tables.
+pub fn sp_comp(c: String) -> String {
+    if c == "D" { return "%m/%d/%y"; }
+    if c == "F" { return "%Y-%m-%d"; }
+    if c == "R" { return "%H:%M"; }
+    if c == "T" { return "%H:%M:%S"; }
+    if c == "r" { return "%I:%M:%S %p"; }
+    if c == "x" { return "%m/%d/%Y"; }
+    if c == "X" { return "%I:%M:%S %p"; }
+    return "";
+}

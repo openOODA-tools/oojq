@@ -75,32 +75,68 @@ pub fn builtin_reverse(doc: JDoc, idx: Int) -> Result[SRes, String] {
     return Ok(array_result(doc, kids));
 }
 
-fn join_strings(doc: JDoc, kids: List[Int], sep: String) -> String {
-    let mut acc: String = "";
-    let mut i: Int = 0;
-    while i < list_len(kids) {
-        if i > 0 { acc = acc + sep; }
-        let e: JVal = jval_at(doc, list_get(kids, i));
-        acc = acc + e.sval;
-        i = i + 1;
-    }
-    return acc;
+// A refused addition names the string that had been reached, not the one that
+// was asked for, so the accumulator is written into the arena to be rendered
+// the way every other value in a refusal is rendered. It costs one node, on a
+// path that ends the run immediately.
+fn join_refusal(doc: JDoc, acc: String, m: Int) -> String {
+    let p: PRes = jdoc_push(doc, jval_string(acc));
+    let q: JDoc = p.doc;
+    return cannot_pair(q, p.idx, m, "added");
 }
 
-pub fn builtin_join(doc: JDoc, idx: Int, sep: String) -> Result[SRes, String] {
+// join is a reduce whose every step is an ordinary +, and + is what makes the
+// shape of the answer. A string on the left CONCATENATES a string, LEAVES
+// ITSELF ALONE for a null, and REFUSES a number, a boolean or a container:
+// "a" + 1 is an error in jq, not "a1". The MEMBER is spelled to text first,
+// which is why [1,2,3] joins to "1,2,3" and [[1],[2]] does not join at all. The
+// SEPARATOR is added as it was written, which is why join(1) is a refusal and
+// join(null) is not, and why ["a","b"] | join([1]) fails on the separator with
+// the string "a" already built rather than on a member.
+fn join_sep(doc: JDoc, acc: String, s: Int) -> Result[String, String] {
+    let e: JVal = jval_at(doc, s);
+    if e.kind == "string" { return Ok(acc + e.sval); }
+    if e.kind == "null" { return Ok(acc); }
+    return Err(join_refusal(doc, acc, s));
+}
+
+fn join_member(doc: JDoc, acc: String, m: Int) -> Result[String, String] {
+    let e: JVal = jval_at(doc, m);
+    if e.kind == "null" { return Ok(acc); }
+    if e.kind == "array" || e.kind == "object" { return Err(join_refusal(doc, acc, m)); }
+    return Ok(acc + render_as_text(doc, m));
+}
+
+// An object joins its VALUES in the order it already holds them: the names are
+// never asked for, so {"b":2,"a":1} joins to "2,1", which is the arena's order
+// rather than a sort. An empty container joins to the empty string, because the
+// accumulator starts empty and no step ever runs.
+pub fn builtin_join(doc: JDoc, idx: Int, arg: Int) -> Result[SRes, String] {
     let v: JVal = jval_at(doc, idx);
-    if v.kind != "array" {
-        return Err("join needs an array, not a " + v.kind);
+    if v.kind != "array" && v.kind != "object" {
+        return Err("Cannot iterate over " + kind_word(v.kind) + " (" + shown_value(doc, idx) + ")");
     }
+    let mut acc: String = "";
+    let mut first: Bool = true;
     let mut i: Int = 0;
     while i < list_len(v.kids) {
-        let e: JVal = jval_at(doc, list_get(v.kids, i));
-        if e.kind != "string" {
-            return Err("join needs an array of strings");
+        if !first {
+            let s: Result[String, String] = join_sep(doc, acc, arg);
+            match s {
+                Err(e) => { return Err(e); }
+                Ok(a) => { acc = a; }
+            }
         }
+        let m: Int = list_get(v.kids, i);
+        let r: Result[String, String] = join_member(doc, acc, m);
+        match r {
+            Err(e) => { return Err(e); }
+            Ok(a) => { acc = a; }
+        }
+        first = false;
         i = i + 1;
     }
-    return Ok(str_result(doc, join_strings(doc, v.kids, sep)));
+    return Ok(str_result(doc, acc));
 }
 
 pub fn builtin_first(doc: JDoc, idx: Int) -> Result[SRes, String] {

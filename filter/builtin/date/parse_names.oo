@@ -1,0 +1,203 @@
+// # Reading Numbers And Names
+//
+// Logline: Reads the two shapes a strptime directive can match, a run of digits and a spelled name, each with the blank handling and the case folding that goes with it.
+// Setup: Pure, no capability needed. Nothing here knows what a date is; it says what it read and how far the match got, and the caller decides what that means.
+// Beats:
+//   1. Digits, with a width and a range, after the blanks in front of them, because every numeric directive skips blanks and no name does.
+//   2. A name answered as a pair, the value and the position past it, because one Int cannot carry both and a struct cannot cross a page boundary.
+//   3. Failure as an empty list, so the caller tests one shape rather than three.
+
+import "std/core/primitives/str.oo";
+import "filter/syntax/scan/parse_lit.oo";
+import "filter/eval/num_read.oo";
+
+// The text being read, in a struct so that a caller may hand it to as many
+// readers as it likes. A bare String is linear and may be moved once per
+// function, which is one reader per function, and a format has six.
+pub type In = struct {
+    in_text: String
+};
+
+// Every numeric directive skips the blanks in front of it, any number of them,
+// which is what makes "%Y- 3- 5" a date rather than a miss. A name and %p do
+// not, so this is called from the digit paths and nowhere else.
+pub fn rd_blanks(t: In, p: Int) -> Int {
+    let mut i: Int = p;
+    while i < chars_len(t.in_text) && char_at(t.in_text, i) == " " { i = i + 1; }
+    return i;
+}
+
+// Which of the thirteen numeric directives a code is, so that the walk reads it
+// once and then files it instead of repeating the read in thirteen branches.
+// The width and the two bounds are measured, not assumed: %m and %d and %I
+// refuse a zero because the parse side counts from one even though the array
+// counts the month from zero, %j refuses one for the same reason, and %S stops
+// at 61 because that is a leap second and 62 is not one.
+pub fn dr_kind(c: String) -> Int {
+    if c == "Y" { return 1; }
+    if c == "y" { return 2; }
+    if c == "C" { return 3; }
+    if c == "m" { return 4; }
+    if c == "d" { return 5; }
+    if c == "e" { return 5; }
+    if c == "j" { return 6; }
+    if c == "H" { return 7; }
+    if c == "I" { return 8; }
+    if c == "M" { return 9; }
+    if c == "S" { return 10; }
+    if c == "u" { return 11; }
+    if c == "w" { return 12; }
+    return 0;
+}
+
+pub fn dr_w(k: Int) -> Int {
+    if k == 1 { return 4; }
+    if k == 6 { return 3; }
+    if k == 11 || k == 12 { return 1; }
+    return 2;
+}
+
+pub fn dr_lo(k: Int) -> Int {
+    if k == 4 || k == 5 || k == 6 || k == 8 || k == 11 { return 1; }
+    return 0;
+}
+
+pub fn dr_hi(k: Int) -> Int {
+    if k == 1 { return 9999; }
+    if k == 2 || k == 3 { return 99; }
+    if k == 4 { return 12; }
+    if k == 5 { return 31; }
+    if k == 6 { return 366; }
+    if k == 7 { return 23; }
+    if k == 8 { return 12; }
+    if k == 9 { return 59; }
+    if k == 10 { return 61; }
+    if k == 11 { return 7; }
+    return 6;
+}
+
+// A reader has two answers, what it read and where it stopped, and the walk in
+// strptime.oo needs both. One Int cannot hold them and a struct declared here
+// loses its field names on the way into the backend, so the pair travels as a
+// two element list: the value, then the position just past the match.
+fn rd_pair(v: Int, e: Int) -> List[Int] {
+    let mut l: List[Int] = list_new();
+    l = list_push(l, v);
+    l = list_push(l, e);
+    return l;
+}
+
+// A name matches without regard to case, as the whole word or as its first
+// three letters, and nothing in between: "Sept" and "Tues" are not accepted
+// here, and neither is "Mar2", whose trailing digit the format never asked for.
+// The full word is tried first, because the abbreviation is a prefix of it and
+// the other order reads "March" as "Mar" and leaves "ch" behind. Each is tried
+// only where the text is long enough to hold it, so a name at the very end is
+// not sliced past. An empty list means the name was not there at all.
+pub fn rd_word(t: In, p: Int, idx: Int, full: String, abbr: String) -> List[Int] {
+    let n: Int = chars_len(t.in_text);
+    if p >= n { return list_new(); }
+    if p + chars_len(full) <= n {
+        if to_uppercase(str_slice(t.in_text, p, p + chars_len(full))) == full {
+            return rd_pair(idx, p + chars_len(full));
+        }
+    }
+    if p + 3 <= n {
+        if to_uppercase(str_slice(t.in_text, p, p + 3)) == abbr { return rd_pair(idx, p + 3); }
+    }
+    return list_new();
+}
+
+// AM is 0 and PM is 1, as a pair, and an empty list is no match. Case folded
+// like a name, and with no blanks skipped in front, because %p is a word and
+// not a number.
+pub fn rd_ampm(t: In, p: Int) -> List[Int] {
+    let mut r: List[Int] = rd_word(t, p, 0, "AM", "AM");
+    if list_len(r) > 0 { return r; }
+    r = rd_word(t, p, 1, "PM", "PM");
+    if list_len(r) > 0 { return r; }
+    return list_new();
+}
+
+// %G, %V, %U, and %W are read and then thrown away: jq parses them and sets no
+// field, so all that matters here is how much text they eat, and the value half
+// of the pair is 0 for all four. %G is greedy with no width at all, which is why
+// "20155555" matches it, and the other three stop after two digits. None of them
+// skips blanks, being as inert as they are.
+pub fn rd_inert(t: In, p: Int, code: String) -> List[Int] {
+    let n: Int = chars_len(t.in_text);
+    if p >= n || !digit_char(char_at(t.in_text, p)) { return list_new(); }
+    let mut i: Int = p;
+    let mut c: Int = 0;
+    while i < n && digit_char(char_at(t.in_text, i)) {
+        i = i + 1;
+        c = c + 1;
+    }
+    if code != "G" && c > 2 { return list_new(); }
+    return rd_pair(0, i);
+}
+
+// %Z takes everything up to the next blank and may take nothing at all, so the
+// run is far wider than a zone name: a dash, a dot, a comma, an underscore, a
+// percent sign, and a colon all stay inside it, which is why "GMT-2015" is one
+// token and "%Z-%Y" therefore finds no dash left to match. A space and a tab
+// both end it, and those two are the whole of what was measured.
+pub fn rd_zone(t: In, p: Int) -> List[Int] {
+    let n: Int = chars_len(t.in_text);
+    let mut i: Int = p;
+    while i < n {
+        let c: String = char_at(t.in_text, i);
+        if c == " " || c == "\t" { break; }
+        i = i + 1;
+    }
+    return rd_pair(0, i);
+}
+
+// %z is the one directive that checks what it reads: a Z, or a sign and four
+// digits, or a sign, two digits, a colon, and two digits. "+0000x" and "+00000"
+// are both refused, so the width is exact. It does not have to reach the end of
+// the text, which is what lets "%z-%Y" read the "+0000-2015" that an RFC 3339
+// timestamp is made of. The minutes are checked and the hours are not: "+2500"
+// and "+9900" are both accepted while "+0060" is refused.
+pub fn rd_offset(t: In, p: Int) -> List[Int] {
+    let n: Int = chars_len(t.in_text);
+    if p >= n { return list_new(); }
+    if char_at(t.in_text, p) == "Z" { return rd_pair(0, p + 1); }
+    if char_at(t.in_text, p) != "+" && char_at(t.in_text, p) != "-" { return list_new(); }
+    if p + 5 <= n && rd_digits(t, p + 1, 4) == 4 {
+        if rd_num(t, p + 3, 2) > 59 { return list_new(); }
+        return rd_pair(0, p + 5);
+    }
+    if p + 6 <= n && char_at(t.in_text, p + 3) == ":" && rd_digits(t, p + 1, 2) == 2
+        && rd_digits(t, p + 4, 2) == 2 {
+        if rd_num(t, p + 4, 2) > 59 { return list_new(); }
+        return rd_pair(0, p + 6);
+    }
+    return list_new();
+}
+
+// How many of the next max characters are digits, stopping at the first that is
+// not one. Used only where the width is already known, so that "+05:3" is not
+// read as a four digit offset with a colon in the middle of it.
+fn rd_digits(t: In, p: Int, max: Int) -> Int {
+    let n: Int = chars_len(t.in_text);
+    let mut i: Int = p;
+    let mut c: Int = 0;
+    while c < max && i < n && digit_char(char_at(t.in_text, i)) {
+        i = i + 1;
+        c = c + 1;
+    }
+    return c;
+}
+
+// Those same digits as a number, for the one range check %z makes. The width is
+// already known to be exact by the time this is called.
+fn rd_num(t: In, p: Int, n: Int) -> Int {
+    let mut v: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        v = v * 10 + digit_of(char_at(t.in_text, p + i));
+        i = i + 1;
+    }
+    return v;
+}

@@ -1,0 +1,245 @@
+// # strptime
+//
+// Logline: Reads text back into the broken-down array, matching the whole string against a format and refusing the one shape whose last two slots jq never computes.
+// Setup: Pure, no capability needed. parse_names.oo reads digits and parse_cal.oo reads names, civil_days.oo owns the calendar, and the walk over the format and the rule for the weekday and the yearday are both here.
+// Beats:
+//   1. Match the literals, the twenty-four directives jq accepts, and the seven composites it can read back, refusing %c and any code jq does not know, because a format that cannot be honoured is a miss and not a smaller match.
+//   2. Work out the weekday and the yearday from one day count, which is where the -1 of a bare %Y comes from.
+//   3. Refuse a format naming no date, where jq answers those two slots with whatever its C stack happened to hold, and refuse trailing text, where jq puts it in the array as a ninth element.
+
+import "parse/value_tree.oo";
+import "filter/select_node.oo";
+import "filter/builtin/date/civil_days.oo";
+import "filter/builtin/date/parse_names.oo";
+import "filter/builtin/date/parse_cal.oo";
+import "filter/builtin/date/parse_codes.oo";
+
+// How far past p a run of at most max digits reaches, or -1 when there is no
+// digit there. The width is what refuses "02015" for %Y and "003" for %m.
+fn rd_end(t: In, p: Int, max: Int) -> Int {
+    let mut i: Int = rd_blanks(t, p);
+    let mut n: Int = 0;
+    while n < max && i < chars_len(t.in_text) && digit_char(char_at(t.in_text, i)) {
+        i = i + 1;
+        n = n + 1;
+    }
+    if n == 0 { return 0 - 1; }
+    return i;
+}
+
+// The value of that same run, read a second time. Two passes over three
+// characters is cheaper than carrying a struct back, and strftime.oo returns
+// Strings for the same reason.
+fn rd_val(t: In, p: Int, max: Int) -> Int {
+    let mut i: Int = rd_blanks(t, p);
+    let end: Int = rd_end(t, p, max);
+    let mut v: Int = 0;
+    while i < end {
+        v = v * 10 + digit_of(char_at(t.in_text, i));
+        i = i + 1;
+    }
+    return v;
+}
+
+// %y is the only directive with a century in it, and the pivot is the C one:
+// 00 to 68 are this century and 69 to 99 the last, which is why "69" is 1969 and
+// "68" is 2068. %C then writes the century outright and a following %y
+// overwrites it, so "%C %y" on "20 15" is 2015 and on "19 99" is 1999.
+fn sp_century(v: Int) -> Int {
+    if v < 69 { return 2000 + v; }
+    return 1900 + v;
+}
+
+// The seven composites jq can read back live in parse_codes.oo, spelled the
+// way strftime spells them so that the two agree and each is written once.
+fn sp_known(c: String) -> Bool {
+    if dr_kind(c) > 0 { return true; }
+    if c == "b" || c == "B" || c == "a" || c == "A" || c == "p" { return true; }
+    if c == "Z" || c == "z" { return true; }
+    if c == "G" || c == "V" || c == "U" || c == "W" { return true; }
+    return false;
+}
+
+fn sp_run(fmt: String, t: In) -> Result[List[Int], String] {
+    let mut y: Int = 0 - 1;
+    let mut hh: Int = 0;
+    let mut mi: Int = 0;
+    let mut sec: Int = 0;
+    let mut mon: Int = 0 - 1;
+    let mut mday: Int = 0 - 1;
+    let mut yday: Int = 0 - 1;
+    let mut wd: Int = 0 - 1;
+    let mut p: Int = 0;
+    // A composite is expanded by pushing its spelling on the queue ahead of the
+    // text that followed it, so that %F inside a longer format reads its own
+    // parts in the order they were written and "%F %T" is a date and a clock.
+    let mut q: List[String] = list_new();
+    q = list_push(q, fmt);
+    let mut fi: Int = 0;
+    while fi < list_len(q) {
+        let cur: String = list_get(q, fi);
+        fi = fi + 1;
+        let n: Int = chars_len(cur);
+        let mut i: Int = 0;
+        while i < n {
+            if char_at(cur, i) != "%" {
+                if p >= chars_len(t.in_text) { return Err("miss"); }
+                if char_at(t.in_text, p) != char_at(cur, i) { return Err("miss"); }
+                p = p + 1;
+                i = i + 1;
+                continue;
+            }
+            if i + 1 >= n { return Err("miss"); }
+            let c: String = char_at(cur, i + 1);
+            let comp: String = sp_comp(c);
+            if comp != "" {
+                q = list_push(q, comp);
+                if i + 2 < n { q = list_push(q, str_slice(cur, i + 2, n)); }
+                i = n;
+                continue;
+            }
+            if !sp_known(c) { return Err("miss"); }
+            let k: Int = dr_kind(c);
+            if k > 0 {
+                let e: Int = rd_end(t, p, dr_w(k));
+                let v: Int = rd_val(t, p, dr_w(k));
+                if e < 0 { return Err("miss"); }
+                if v < dr_lo(k) || v > dr_hi(k) { return Err("miss"); }
+                if k == 1 { y = v; }
+                else if k == 2 { y = sp_century(v); }
+                else if k == 3 { y = v * 100; }
+                else if k == 4 { mon = v - 1; }
+                else if k == 5 { mday = v; }
+                else if k == 6 { yday = v - 1; }
+                else if k == 7 { hh = v; }
+                else if k == 8 { hh = v % 12; }
+                else if k == 9 { mi = v; }
+                else if k == 10 { sec = v; }
+                else if k == 11 { wd = v % 7; }
+                else { wd = v; }
+                p = e;
+                i = i + 2;
+                continue;
+            }
+            let mut r: List[Int] = list_new();
+            if c == "b" || c == "B" { r = rd_month(t, p); }
+            else if c == "a" || c == "A" { r = rd_wday(t, p); }
+            else if c == "p" { r = rd_ampm(t, p); }
+            else if c == "Z" { r = rd_zone(t, p); }
+            else if c == "z" { r = rd_offset(t, p); }
+            else { r = rd_inert(t, p, c); }
+            if list_len(r) < 2 { return Err("miss"); }
+            let v: Int = list_get(r, 0);
+            // %p converts whatever hour is current rather than remembering one of
+            // its own, so it is the twelve hour clock %I leaves behind that %p then
+            // doubles. That is what makes "%I %p" and "%p %I" agree, and
+            // "%H %I %p" answer thirteen while "%I %p %H" answer five.
+            if c == "b" || c == "B" { mon = v; }
+            else if c == "a" || c == "A" { wd = v; }
+            else if c == "p" { hh = hh % 12; if v == 1 { hh = hh + 12; } }
+            p = list_get(r, 1);
+            i = i + 2;
+        }
+    }
+    // jq does not require the format to eat the whole string. What is left over
+    // is appended to the answer as a ninth element, which is a String where the
+    // ninth element of gmtime is an integer offset, so "2015 extra" parsed by
+    // "%Y" answers [2015,0,0,0,0,0,3,-1," extra"]. That is refused here instead.
+    if p != chars_len(t.in_text) { return Err("tail:" + str_slice(t.in_text, p, chars_len(t.in_text))); }
+    return sp_finish(y, hh, mi, sec, mon, mday, yday, wd);
+}
+
+fn sp_finish(y0: Int, hh: Int, mi: Int, sec: Int, mon0: Int, mday0: Int, yday0: Int, wd0: Int) -> Result[List[Int], String] {
+    let mut y: Int = y0;
+    let mut mon: Int = mon0;
+    let mut mday: Int = mday0;
+    let yday: Int = yday0;
+    // The day count %j walked to when it ran off the end of the year, and
+    // whether it did. A day count is negative before 1970, so the flag cannot
+    // be "is the count positive": 1901-01-01 is -25202 and that is exactly the
+    // case the flag exists for.
+    let mut away: Int = 0;
+    let mut ran: Bool = false;
+    // %j fills in whichever of the month and the day nothing else wrote, and
+    // the two are independent: "2015 064 9" is March the 9th, because %d wrote
+    // the day and %j wrote the month, and "2015 9 064" is the same date with the
+    // two the other way round. It needs a year or a month to belong to, because
+    // a day of the year with neither is the shape jq answers with 8 and 367.
+    if yday >= 0 && (y >= 0 || mon >= 0) {
+        if y < 0 { y = 1900; }
+        let start: Int = civil_days(y, 1, 1);
+        let at: Int = start + yday;
+        let civ: Civ = days_civil(at);
+        let past: Bool = at >= civil_days(y + 1, 1, 1);
+        if mon < 0 {
+            // The walk ran into the next year. With a month named the day clamps
+            // to the last of that month; with none named jq answers a month of
+            // 24 and a day of 31, measured on 2015, 2001 and 1900, while still
+            // taking the weekday from the real date, which is why "2015 366" is
+            // a Friday and "1900 366" is a Tuesday.
+            if past { mon = 24; away = at; ran = true; } else { mon = civ.m - 1; }
+        }
+        if mday < 0 {
+            if past { mday = 31; } else { mday = civ.d; }
+        }
+    }
+    if y < 0 && mon < 0 && mday < 0 {
+        return Err("strptime format names no date, and jq leaves the weekday and the yearday as whatever its C stack held");
+    }
+    if mon < 0 { mon = 0; }
+    if mday < 0 { mday = 0; }
+    if y < 0 { y = 1900; }
+    // One day count, and both of the last two slots come off it. The yearday
+    // is measured against the year that was written rather than the year the
+    // day lands in, which is why a bare %Y on 2015 answers -1: a day of zero in
+    // January is the day before the first, and that is one day before the year.
+    let days: Int = civil_days(y, mon + 1, mday);
+    let mut wd: Int = day_weekday(days);
+    if ran { wd = day_weekday(away); }
+    if wd0 >= 0 { wd = wd0; }
+    let mut yd: Int = days - civil_days(y, 1, 1);
+    if yday >= 0 { yd = yday; }
+    let mut f: List[Int] = list_new();
+    f = list_push(f, y);
+    f = list_push(f, mon);
+    f = list_push(f, mday);
+    f = list_push(f, hh);
+    f = list_push(f, mi);
+    f = list_push(f, sec);
+    f = list_push(f, wd);
+    f = list_push(f, yd);
+    return Ok(f);
+}
+
+pub fn builtin_strptime(doc: JDoc, idx: Int, arg: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    let fv: JVal = jval_at(doc, arg);
+    if v.kind != "string" || fv.kind != "string" {
+        return Err("strptime/1 requires string inputs and arguments");
+    }
+    let t: In = In { in_text: v.sval };
+    let fin: Result[List[Int], String] = sp_run(fv.sval, t);
+    match fin {
+        Err(why) => {
+            if why == "miss" { return Err("date \"" + v.sval + "\" does not match format \"" + fv.sval + "\""); }
+            if chars_len(why) > 4 && str_slice(why, 0, 5) == "tail:" {
+                return Err("strptime format \"" + fv.sval + "\" leaves \"" + str_slice(why, 5, chars_len(why))
+                    + "\" unread, and jq answers with that text as a ninth element where gmtime puts an integer");
+            }
+            return Err(why);
+        }
+        Ok(f) => {
+            let mut live: JDoc = doc;
+            let mut kids: List[Int] = list_new();
+            let mut i: Int = 0;
+            while i < list_len(f) {
+                let made: SRes = int_result(live, list_get(f, i));
+                live = made.doc;
+                kids = list_push(kids, list_get(made.out, 0));
+                i = i + 1;
+            }
+            let made: SRes = array_result(live, kids);
+            return Ok(made);
+        }
+    }
+}

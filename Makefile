@@ -1,7 +1,7 @@
 # oojq v0.0.1 Makefile
 #
 # Build, the verification gate, and the three oracles that check the answers:
-# test (544 assertions), parity (byte-compare against the installed jq), and
+# test (1036 assertions), parity (byte-compare against the installed jq), and
 # sweep (corpus-blind probes that can find what parity cannot).
 #
 # Usage:
@@ -23,34 +23,13 @@ OODACODEX ?= $(HOME)/.openooda/northstar.oot
 OO_LIST_AMBIENT_QUOTA ?= 8589934592
 BIN := dist/oojq
 
-SRC := main.oo anchor.oo \
-       parse/anchor.oo parse/value_tree.oo parse/buffer_from_text.oo \
-       parse/decode_number.oo parse/float_scan.oo parse/parse_document.oo \
-       parse/utf8.oo parse/unescape_unicode.oo \
-       filter/anchor.oo filter/ast.oo filter/select_node.oo filter/filter_eval.oo \
-       filter/syntax/anchor.oo filter/syntax/lower.oo filter/syntax/object_lower.oo filter/syntax/scan/parse_lit.oo filter/syntax/scan/parse_span.oo \
-       filter/syntax/parse_prim.oo filter/syntax/parse_expr.oo filter/syntax/parse_top.oo \
-       filter/syntax/parse_path.oo \
-       filter/eval/anchor.oo filter/eval/num_read.oo filter/eval/num/num_add.oo filter/eval/num/num_round.oo \
-       filter/eval/eval_leaf.oo filter/eval/eval_cmp.oo filter/eval/eval_div.oo \
-       filter/eval/eval_op.oo filter/eval/eval_builtin.oo filter/eval/leaf/leaf_step.oo \
-       filter/run/anchor.oo filter/run/eval_join.oo filter/run/eval_sort.oo \
-       filter/run/eval_path.oo filter/run/eval_bykey.oo filter/run/eval_suggest.oo \
-       filter/run/eval_each.oo \
-       filter/run/eval_run.oo \
-       filter/builtin/anchor.oo filter/builtin/builtin_core.oo \
-       filter/builtin/builtin_order.oo filter/builtin/builtin_string.oo \
-       filter/builtin/builtin_entries.oo filter/builtin/builtin_shape.oo \
-       filter/builtin/builtin_text.oo filter/builtin/builtin_range.oo \
-       filter/builtin/object/builtin_object.oo filter/builtin/path/setpath.oo filter/builtin/path/update.oo filter/builtin/rewrite/rewrite.oo \
-       filter/builtin/date/civil_days.oo filter/builtin/date/date_builtins.oo \
-       render/anchor.oo render/render_string.oo render/render_value.oo \
-       render/render_format.oo render/render_b64.oo render/render_table.oo \
-       ipc/anchor.oo ipc/read_source.oo ipc/resolve_args.oo \
-       ipc/mcp_frame.oo ipc/mcp_reply.oo ipc/mcp_grammar.oo \
-       ipc/mcp_tool.oo ipc/mcp_serve.oo
+# Every page in the tree rather than a hand written list, which had drifted by
+# ten pages, and a page missing from it meant an edit to it did not rebuild.
+SRC := $(shell find . -name '*.oo' -not -path './dist/*' -not -path './.ooda-cache/*' | sed 's|^\./||' | sort)
 
-.PHONY: build check line-cap file-law academy density suggest-audit dead-tests dup-names test parity sweep coverage verify clean
+.PHONY: all build check line-cap file-law academy density suggest-audit dead-tests dup-names test parity sweep coverage verify install package-deb package-rpm package clean
+
+all: build verify test
 
 build: $(BIN)
 
@@ -58,7 +37,9 @@ $(BIN): $(SRC)
 	@mkdir -p dist .ooda-cache/ooda-tmp
 	OO_LIST_AMBIENT_QUOTA=$(OO_LIST_AMBIENT_QUOTA) OODACODEX=$(OODACODEX) OODA_COMPILER=$(OODA_COMPILER) OODA_NO_JAIL=1 $(OODA_COMPILER) build main.oo -o $(BIN)
 	@chmod +x $(BIN)
-	@echo "built $(BIN)"
+	@cp -a $(BIN) dist/oojq-linux-x86_64
+	@sha256sum dist/oojq-linux-x86_64 > dist/oojq-linux-x86_64.sha256
+	@echo "built $(BIN) (and dist/oojq-linux-x86_64)"
 
 # --- Verification gate ---------------------------------------------------------
 
@@ -239,33 +220,21 @@ dead-tests:
 DOC = {"name":"oojq","tags":["json","cli"],"meta":{"stars":42,"active":true,"ratio":-3},"note":null}
 TMPDOC = /tmp/oojq_test_doc.json
 DUPDOC = /tmp/oojq_dup_doc.json
+CNT = /tmp/oojq_suite_counts.txt
+
+# The suite helpers, kept in one place because the suite below is split across
+# several shell invocations: one command longer than 128 KiB is refused by
+# execve, and this suite has already outgrown that. Every chunk starts from
+# these definitions and counts into $(CNT); the summary at the end sums the
+# chunks, so a broken run still reports every failure it found, not only the
+# first chunk that happened to have one.
+define SUITE_FNS
+pass=0; fail=0; printf '$(DOC)' > $(TMPDOC); assert_out() {   got=$$1; want=$$2; name=$$3;   if [ "$$got" = "$$want" ]; then echo "PASS: $$name"; pass=$$((pass+1));   else echo "FAIL: $$name"; echo "      want [$$want]"; echo "      got  [$$got]"; fail=$$((fail+1)); fi; }; assert_code() {   got=$$1; want=$$2; name=$$3;   if [ "$$got" = "$$want" ]; then echo "PASS: $$name"; pass=$$((pass+1));   else echo "FAIL: $$name (exit $$got, want $$want)"; fail=$$((fail+1)); fi; }; assert_has() {   got=$$1; needle=$$2; name=$$3;   case "$$got" in *"$$needle"*) echo "PASS: $$name"; pass=$$((pass+1));;     *) echo "FAIL: $$name"; echo "      want to contain [$$needle]"; echo "      got [$$got]"; fail=$$((fail+1));; esac; }; assert_bytes() {   got=$$1; want=$$2; name=$$3;   if [ "$$got" = "$$want" ]; then echo "PASS: $$name"; pass=$$((pass+1));   else echo "FAIL: $$name"; echo "      want $$want bytes on stdout"; echo "      got  $$got bytes"; fail=$$((fail+1)); fi; }; mcp() { printf '%s\n' "$$1" | ./$(BIN) --mcp 2>&1; }; run() { echo '$(DOC)' | ./$(BIN) "$$@" 2>&1; }; j() { echo '$(DOC)' | ./$(BIN) "$$@" 2>&1 | tr '\n' '|'; }; jc() { echo '$(DOC)' | ./$(BIN) -c "$$@" 2>&1 | tr '\n' '|'; }; t() { ./$(BIN) -c "$$1" $(TMPDOC) 2>&1 | tr '\n' '@'; }; d() { printf '%s' "$$1" > $(DUPDOC); ./$(BIN) -c "$$2" $(DUPDOC) 2>&1 | tr '\n' '@'; };
+endef
 
 test: build
-	@pass=0; fail=0; \
-	assert_out() { \
-	  got=$$1; want=$$2; name=$$3; \
-	  if [ "$$got" = "$$want" ]; then echo "PASS: $$name"; pass=$$((pass+1)); \
-	  else echo "FAIL: $$name"; echo "      want [$$want]"; echo "      got  [$$got]"; fail=$$((fail+1)); fi; \
-	}; \
-	assert_code() { \
-	  got=$$1; want=$$2; name=$$3; \
-	  if [ "$$got" = "$$want" ]; then echo "PASS: $$name"; pass=$$((pass+1)); \
-	  else echo "FAIL: $$name (exit $$got, want $$want)"; fail=$$((fail+1)); fi; \
-	}; \
-	assert_has() { \
-	  got=$$1; needle=$$2; name=$$3; \
-	  case "$$got" in *"$$needle"*) echo "PASS: $$name"; pass=$$((pass+1));; \
-	    *) echo "FAIL: $$name"; echo "      want to contain [$$needle]"; echo "      got [$$got]"; fail=$$((fail+1));; esac; \
-	}; \
-	assert_bytes() { \
-	  got=$$1; want=$$2; name=$$3; \
-	  if [ "$$got" = "$$want" ]; then echo "PASS: $$name"; pass=$$((pass+1)); \
-	  else echo "FAIL: $$name"; echo "      want $$want bytes on stdout"; echo "      got  $$got bytes"; fail=$$((fail+1)); fi; \
-	}; \
-	mcp() { printf '%s\n' "$$1" | ./$(BIN) --mcp 2>&1; }; \
-	run() { echo '$(DOC)' | ./$(BIN) "$$@" 2>&1; }; \
-	j() { echo '$(DOC)' | ./$(BIN) "$$@" 2>&1 | tr '\n' '|'; }; \
-	jc() { echo '$(DOC)' | ./$(BIN) -c "$$@" 2>&1 | tr '\n' '|'; }; \
+	@rm -f $(CNT);
+	@$(SUITE_FNS) \
 	assert_out "$$(j '.name')" '"oojq"|' "select a scalar field"; \
 	assert_out "$$(j '.meta.stars')" '42|' "select a nested field"; \
 	assert_out "$$(j '.meta.ratio')" '-3|' "keep a negative integer signed"; \
@@ -273,6 +242,77 @@ test: build
 	assert_out "$$(j '.meta.active')" 'true|' "render a true literal"; \
 	assert_out "$$(j '.tags[]')" '"json"|"cli"|' "iterate an array"; \
 	assert_out "$$(j '.meta[]')" '42|true|-3|' "iterate an object into values"; \
+	assert_out "$$(echo '[[1],[2]]' | ./$(BIN) -c '[recurse(.[]?)]' 2>&1)" '[[[1],[2]],[1],1,[2],2]' "recurse(f) answers preorder, where a queue would answer [2] before 1"; \
+	assert_out "$$(echo '{"a":{"b":1}}' | ./$(BIN) -c '[recurse(.[]?)]' 2>&1)" '[{"a":{"b":1}},{"b":1},1]' "recurse(f) walks into an object"; \
+	assert_out "$$(echo '1' | ./$(BIN) -c '[recurse(empty)]' 2>&1)" '[1]' "a recurse(f) whose f answers nothing stops at the value in hand"; \
+	assert_out "$$(echo '[[1,2]]' | ./$(BIN) -c '[recurse]' 2>&1)" '[[[1,2]],[1,2],1,2]' "bare recurse is still the object descent"; \
+	assert_out "$$(echo '1' | ./$(BIN) -c '[recurse(.*2; . < 20)]' 2>&1)" '[1,2,4,8,16]' "recurse(f; c) is recurse(f | select(c))"; \
+	assert_out "$$(echo null | ./$(BIN) -c '1,2 | [recurse(.+1; . < 3)]' 2>&1 | tr '\n' '|')" '[1,2]|[2]|' "recurse is read per value, so a stream is split first"; \
+	assert_has "$$(echo '[[1,2]]' | ./$(BIN) -c '[recurse(.[])]' 2>&1)" 'Cannot iterate over' "recurse(f) lets an error through, as in jq"; \
+	assert_out "$$(echo '[1,[2,[3]]]' | ./$(BIN) -c '[walk(if type=="number" then .*10 else . end)]' 2>&1)" '[[10,[20,[30]]]]' "walk(f) reaches every depth, not the first"; \
+	assert_out "$$(echo '{"a":{"b":[1]}}' | ./$(BIN) -c '[walk(if type=="number" then .+1 else . end)]' 2>&1)" '[{"a":{"b":[2]}}]' "and through nested objects"; \
+	assert_out "$$(echo '[[1]]' | ./$(BIN) -c '[walk(if .==[1] then "saw" else . end)]' 2>&1)" '[["saw"]]' "the body is applied to the REBUILT value, so it can match it"; \
+	assert_out "$$(echo '{"a":1,"b":2}' | ./$(BIN) -c '[walk(if .==1 then empty else . end)]' 2>&1)" '[{"b":2}]' "a child that answers nothing takes its key with it"; \
+	assert_out "$$(echo '[1,2]' | ./$(BIN) -c '[walk(if .==1 then empty else . end)]' 2>&1)" '[[2]]' "and an array child that answers nothing leaves the array shorter"; \
+	assert_out "$$(echo '1' | ./$(BIN) -c '[walk(if .==1 then 7,8 else . end)]' 2>&1)" '[7,8]' "walk(f) keeps every answer of its body, where a routed call keeps the last"; \
+	assert_out "$$(echo '[1,2]' | ./$(BIN) -c '[walk(empty)]' 2>&1)" '[]' "a walk whose body answers nothing is no answer"; \
+	assert_out "$$(echo null | ./$(BIN) -c '1,2 | [walk(.)]' 2>&1 | tr '\n' '|')" '[1]|[2]|' "walk is read per value, so a stream is split first"; \
+	assert_out "$$(echo '[{"key":"a"}]' | ./$(BIN) -c from_entries 2>&1)" '{"a":null}' "from_entries reads a missing value as null, which is what walk(f) leans on"; \
+	assert_out "$$(echo '[{"Key":"a","Value":1}]' | ./$(BIN) -c from_entries 2>&1)" '{"a":1}' "from_entries reads the Key and Value spellings too"; \
+	assert_out "$$(echo '[{"name":"n","Name":"N","value":1}]' | ./$(BIN) -c from_entries 2>&1)" '{"n":1}' "where name beats Name"; \
+	assert_out "$$(echo '[{"key":"k","Key":"K","value":1}]' | ./$(BIN) -c from_entries 2>&1)" '{"k":1}' "and key beats Key"; \
+	assert_has "$$(echo '[{"k":"a","v":1}]' | ./$(BIN) -c from_entries 2>&1)" 'Cannot use null (null) as object key' "from_entries does not read k or v at all, so it is a key that is not there"; \
+	assert_has "$$(echo '[{"key":1,"value":2}]' | ./$(BIN) -c from_entries 2>&1)" 'Cannot use number (1) as object key' "a key that is not a string is refused, naming the kind and the value"; \
+	assert_has "$$(echo '[1,2]' | ./$(BIN) -c from_entries 2>&1)" 'Cannot index number with string "key"' "a non-object entry is refused the way jq indexes it"; \
+	assert_out "$$(echo '[1,2]' | ./$(BIN) -c 'map_values(.+1)' 2>&1)" '[2,3]' "map_values(f) updates every member of an array"; \
+	assert_out "$$(echo '{"a":1,"b":2}' | ./$(BIN) -c 'map_values(.+1)' 2>&1)" '{"a":2,"b":3}' "and every value of an object, keeping the shape"; \
+	assert_out "$$(echo '[1,2]' | ./$(BIN) -c 'map_values(1,2)' 2>&1)" '[1,1]' "map_values keeps the FIRST answer per member, where map gathers them all"; \
+	assert_out "$$(echo '[1,2]' | ./$(BIN) -c 'map(1,2)' 2>&1)" '[1,2,1,2]' "so map_values is not map, and map is still the one that gathers"; \
+	assert_out "$$(echo '{"a":1,"b":2}' | ./$(BIN) -c 'map_values(1,2)' 2>&1)" '{"a":1,"b":1}' "and the first answer rule holds for object values too"; \
+	assert_out "$$(echo '[1,2]' | ./$(BIN) -c 'map_values(if .==1 then empty else .*10 end)' 2>&1)" '[20]' "a member that answers nothing is dropped from an array"; \
+	assert_out "$$(echo '{"a":1,"b":2}' | ./$(BIN) -c 'map_values(if .==1 then empty else . end)' 2>&1)" '{"b":2}' "and takes its key with it in an object"; \
+	assert_out "$$(echo '{"a":1}' | ./$(BIN) -c 'map_values(empty)' 2>&1)" '{}' "a map_values whose body always empties is an empty shape, not empty"; \
+	assert_out "$$(echo '{"a":[1,2]}' | ./$(BIN) -c 'map_values(map_values(.+1))' 2>&1)" '{"a":[2,3]}' "map_values nests, since its body is an ordinary filter"; \
+	assert_out "$$(echo '[[1],[2]]' | ./$(BIN) -c 'map_values(.[])' 2>&1)" '[1,2]' "and a body that gathers flattens the member it was given"; \
+	assert_has "$$(echo '[1,2]' | ./$(BIN) -c 'map_values' 2>&1)" 'map_values' "a bare map_values is refused rather than run over nothing"; \
+	assert_out "$$(echo 2 | ./$(BIN) -c 'if . == 1 then "a" elif . == 2 then "b" else "c" end' 2>&1)" '"b"' "elif takes the branch it names"; \
+	assert_out "$$(echo 9 | ./$(BIN) -c 'if . == 1 then "a" elif . == 2 then "b" else "c" end' 2>&1)" '"c"' "and falls through to else when no elif matched"; \
+	assert_out "$$(echo 1 | ./$(BIN) -c 'if . == 1 then "a" elif . == 2 then "b" end' 2>&1)" '"a"' "elif with no else is still an if that may answer nothing"; \
+	assert_out "$$(echo 1 | ./$(BIN) -c 'if . == 1 then 2 elif 3 then 4 elif . == 1 then 5 end' 2>&1)" '2' "a chain of elif is read left to right"; \
+	assert_out "$$(echo 1 | ./$(BIN) -c 'if . == 1 then 2 elif 3 then 4 elif . == 1 then 5 else 6 end' 2>&1)" '2' "and a chain may end in an else"; \
+	assert_out "$$(echo '"end"' | ./$(BIN) -c 'if . == "if" then 1 elif . == "end" then 2 else 3 end' 2>&1)" '2' "a keyword written inside a string is not a keyword"; \
+	assert_out "$$(echo 5 | ./$(BIN) -c 'if . == 1 then "elif" elif . == 2 then "elif elif" else "x" end' 2>&1)" '"x"' "and an elif inside a string does not open a branch"; \
+	assert_out "$$(echo 2 | ./$(BIN) -c 'if . == 1 then 10 elif . == 2 then (if . == 2 then 20 else 21 end) else 30 end' 2>&1)" '20' "an elif branch may hold a whole nested if"; \
+	assert_out "$$(echo 3 | ./$(BIN) -c 'if . == 1 then 10 elif . == 2 then (if . == 2 then 20 else 21 end) else 30 end' 2>&1)" '30' "and the nested if does not swallow the outer else"; \
+	assert_out "$$(echo '[1,2,3]' | ./$(BIN) -c '[.[] | if . == 1 then 1 elif . == 2 then 2 else 3 end]' 2>&1)" '[1,2,3]' "elif works inside a collect, over a stream"; \
+	assert_out "$$(echo 2 | ./$(BIN) -c 'if . == 1 then 0 elif . == 2 then (1,2) else 3 end' 2>&1 | tr '\n' '|')" '1|2|' "an elif branch keeps every answer it gives"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1,2,3] | contains([1,2])' 2>&1)" 'true' "contains over two arrays is a subset test, not an equality"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1,2,3] | contains([1,5])' 2>&1)" 'false' "and one member it does not have makes it false"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1,2,3] | contains([])' 2>&1)" 'true' "every array contains the empty array"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1,2] | contains([1,1])' 2>&1)" 'true' "a subset test, so a repeated member is not asked for twice"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[[1,2]] | contains([[1]])' 2>&1)" 'true' "and the test recurses, so [[1,2]] contains [[1]]"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '{"a":1,"b":2} | contains({"a":1})' 2>&1)" 'true' "contains over two objects is a subset over the members asked for"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '{"a":{"b":1}} | contains({"a":{}})' 2>&1)" 'true' "and it recurses into a member, so an object contains {}"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '{"a":1} | contains({"a":"1"})' 2>&1)" 'false' "a member of the wrong kind is false, not a refusal"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '1 | contains(1.0)' 2>&1)" 'true' "numbers pair with numbers, so 1 contains 1.0"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '"foobar" | contains("oba")' 2>&1)" 'true' "two strings are a substring test"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '{"a":1} | contains("a")' 2>&1)" 'cannot have their containment checked' "a pair of kinds that cannot be checked is refused, not answered false"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '["a"] | contains("a")' 2>&1)" 'cannot have their containment checked' "and an array against a string is refused the same way"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 | contains(true)' 2>&1)" 'cannot have their containment checked' "while a number and a boolean do not pair at all"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '["a","b","a"] | index("a")' 2>&1)" '0' "index over an array is the first member equal to the needle"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '["a","b","a"] | rindex("a")' 2>&1)" '2' "and rindex is the last one"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1,2,3] | index(2)' 2>&1)" '1' "an array member is found by value, not as text"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1] | index(1.0)' 2>&1)" '0' "so a number member and a decimal needle are the same number"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[{"a":1}] | index({"a":1})' 2>&1)" '0' "and an object member is compared whole"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[[1]] | index([1])' 2>&1)" 'null' "but an array member never matches, which is the one rule here"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '["a","b"] | index("z")' 2>&1)" 'null' "a needle that is not there is null, over an array as over a string"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[] | index("a")' 2>&1)" 'null' "and an empty array has no index for anything"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c 'null | index(1)' 2>&1)" 'null' "null answers null rather than refusing, as indexing null does"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 | index(1)' 2>&1)" 'Cannot index number with number' "a number is not a searchable shape, so it reads as an index into it"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '{"a":1} | index("a")' 2>&1)" 'over an object is not supported' "an object is refused rather than guessed at"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '[1,2] | index(1,2)' 2>&1)" 'takes one value' "an argument written as a generator is refused, not read as its last value"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '[1,2] | contains(1,2)' 2>&1)" 'takes one value' "and the same refusal holds for contains"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '["a","b"] | setpath([0]; 1, 2)' 2>&1 | tr '\n' '|')" '[1,"b"]|[2,"b"]|' "setpath still takes a generator on purpose, and answers once per value"; \
 	assert_out "$$(j '.name, .meta.stars')" '"oojq"|42|' "comma unions in order"; \
 	assert_out "$$(j '.tags[] | .')" '"json"|"cli"|' "pipe feeds iteration onward"; \
 	assert_out "$$(echo '{"k":{}}' | ./$(BIN) .k 2>&1)" '{}' "empty object renders as {}"; \
@@ -286,7 +326,6 @@ test: build
 	assert_out "$$(printf '{\n  \"a\": 1.5\n}' | ./$(BIN) . 2>&1 | tr '\n' '~')" '{~  "a": 1.5~}~' "default output is jq pretty form"; \
 	assert_out "$$(echo '{"a":{"b":[{"c":2.5}]}}' | ./$(BIN) .a.b[0].c 2>&1)" '2.5' "float nested three deep"; \
 	assert_out "$$(echo '{"k":[]}' | ./$(BIN) .k 2>&1)" '[]' "empty array renders as []"; \
-	printf '$(DOC)' > $(TMPDOC); \
 	assert_out "$$(./$(BIN) .name $(TMPDOC) 2>&1 | tr '\n' '|')" '"oojq"|' "unquoted filter reads a file"; \
 	assert_out "$$(./$(BIN) .name, .meta.stars $(TMPDOC) 2>&1 | tr '\n' '|')" '"oojq"|42|' "unquoted comma filter needs no quoting"; \
 	assert_out "$$(./$(BIN) .tags[] , .name $(TMPDOC) 2>&1 | tr '\n' '|')" '"json"|"cli"|"oojq"|' "unquoted iterate union"; \
@@ -330,8 +369,18 @@ test: build
 	assert_code "$$(echo '{"n":1}' | ./$(BIN) '.n|reverse' >/dev/null 2>&1; echo $$?)" 2 "reverse refuses a scalar"; \
 	assert_out "$$(echo '{"a":1,"b":2}' | ./$(BIN) 'has("a")' 2>&1)" 'true' "has finds a member"; \
 	assert_out "$$(echo '{"a":1}' | ./$(BIN) 'has("z")' 2>&1)" 'false' "has reports a missing member"; \
-	assert_out "$$(echo '{"a":1}' | ./$(BIN) 'has(1)' 2>&1)" 'false' "has on an object ignores a numeric key"; \
-	assert_code "$$(echo '{"t":[1,2]}' | ./$(BIN) '.t|has(1)' >/dev/null 2>&1; echo $$?)" 2 "has refuses an array as jq does"; \
+	assert_has "$$(echo '{"a":1}' | ./$(BIN) 'has(1)' 2>&1)" 'Cannot check whether object has a number key' "has on an object refuses a number key as jq does"; \
+	assert_out "$$(echo '{"t":[1,2,3]}' | ./$(BIN) '.t|has(0)' 2>&1)" 'true' "has asks an array whether it carries a position"; \
+	assert_out "$$(echo '{"t":[1,2,3]}' | ./$(BIN) '.t|has(2)' 2>&1)" 'true' "has on an array is true at the last position"; \
+	assert_out "$$(echo '{"t":[1,2,3]}' | ./$(BIN) '.t|has(3)' 2>&1)" 'false' "has on an array is false one past the end"; \
+	assert_out "$$(echo '{"t":[1,2,3]}' | ./$(BIN) '.t|has(-1)' 2>&1)" 'false' "has on an array is false before the start"; \
+	assert_out "$$(echo '{"t":[1,2,3]}' | ./$(BIN) '.t|has(0.5)' 2>&1)" 'true' "has on an array truncates a fraction toward zero"; \
+	assert_out "$$(echo '{"t":[1,2,3]}' | ./$(BIN) '.t|has(2.5)' 2>&1)" 'true' "has on an array truncates 2.5 to the last position"; \
+	assert_out "$$(echo '{"t":[]}' | ./$(BIN) '.t|has(0)' 2>&1)" 'false' "has on an empty array is false"; \
+	assert_out "$$(echo '{"t":null}' | ./$(BIN) '.t|has(0)' 2>&1)" 'false' "has on a null is false for a number key"; \
+	assert_out "$$(echo '{"t":null}' | ./$(BIN) '.t|has("a")' 2>&1)" 'false' "has on a null is false for a string key"; \
+	assert_has "$$(echo '{"t":[1,2]}' | ./$(BIN) '.t|has("a")' 2>&1)" 'Cannot check whether array has a string key' "has on an array refuses a string key as jq does"; \
+	assert_has "$$(echo '{"t":1}' | ./$(BIN) '.t|has("a")' 2>&1)" 'Cannot check whether number has a string key' "has on a number refuses a string key as jq does"; \
 	assert_out "$$(echo '{"s":"Hello"}' | ./$(BIN) '.s|startswith("He")' 2>&1)" 'true' "startswith"; \
 	assert_out "$$(echo '{"s":"Hello"}' | ./$(BIN) '.s|endswith("lo")' 2>&1)" 'true' "endswith"; \
 	assert_out "$$(echo '{"s":"Hello"}' | ./$(BIN) '.s|endswith("xx")' 2>&1)" 'false' "endswith rejects a short suffix"; \
@@ -355,13 +404,24 @@ test: build
 	assert_out "$$(echo '[{"key":"a","value":1}]' | ./$(BIN) -c from_entries 2>&1)" '{"a":1}' "from_entries"; \
 	assert_out "$$(echo '{}' | ./$(BIN) 'range(3)' 2>&1 | tr '\n' '|')" '0|1|2|' "range streams its values"; \
 	assert_out "$$(echo '{"t":["a"]}' | ./$(BIN) '.t|join("-")' 2>&1)" '"a"' "join with a separator"; \
-	assert_code "$$(echo '{"t":[1]}' | ./$(BIN) '.t|join("-")' >/dev/null 2>&1; echo $$?)" 2 "join refuses non strings"; \
+	assert_out "$$(echo '{"t":[1]}' | ./$(BIN) '.t|join("-")' 2>&1)" '"1"' "join spells a number member"; \
+	assert_out "$$(echo '{"t":[1,null,true]}' | ./$(BIN) '.t|join(",")' 2>&1)" '"1,,true"' "join spells a null member as empty"; \
+	assert_out "$$(echo '{"t":{"a":1,"b":2}}' | ./$(BIN) '.t|join(",")' 2>&1)" '"1,2"' "join walks an objects values"; \
+	assert_out "$$(echo '{"t":{}}' | ./$(BIN) '.t|join(",")' 2>&1)" '""' "join of an empty object is empty"; \
+	assert_out "$$(echo '{"t":["a","b"]}' | ./$(BIN) '.t|join(null)' 2>&1)" '"ab"' "join with a null separator is a no-op"; \
+	assert_has "$$(echo '{"t":["a","b"]}' | ./$(BIN) '.t|join(1)' 2>&1)" 'string ("a") and number (1) cannot be added' "join refuses a number separator as jq does"; \
+	assert_has "$$(echo '{"t":[[1],[2]]}' | ./$(BIN) '.t|join(",")' 2>&1)" 'string ("") and array ([1]) cannot be added' "join refuses a container member as jq does"; \
+	assert_has "$$(echo '{"t":1}' | ./$(BIN) '.t|join(",")' 2>&1)" 'Cannot iterate over number (1)' "join refuses a number input as jq does"; \
+	assert_has "$$(echo '{"t":"ab"}' | ./$(BIN) '.t|join(",")' 2>&1)" 'Cannot iterate over string ("ab")' "join refuses a string input as jq does"; \
 	assert_code "$$(echo '{"s":"a"}' | ./$(BIN) '.s|startswith' >/dev/null 2>&1; echo $$?)" 2 "startswith without an argument is refused"; \
 	assert_code "$$(echo '{"s":"a"}' | ./$(BIN) '.s|startswith("unterminated)' >/dev/null 2>&1; echo $$?)" 2 "an unterminated argument is refused"; \
 	assert_code "$$(echo '{"a":' | ./$(BIN) . >/dev/null 2>&1; echo $$?)" 2 "malformed JSON is exit 2"; \
 	assert_code "$$(./$(BIN) >/dev/null 2>&1; echo $$?)" 2 "no filter is exit 2"; \
 	assert_code "$$(./$(BIN) --help >/dev/null 2>&1; echo $$?)" 0 "help exits 0"; \
 	assert_code "$$(./$(BIN) --version >/dev/null 2>&1; echo $$?)" 0 "version exits 0"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '2|sqrt' 2>/dev/null)" "oojq: filter \"2|sqrt\": \"sqrt\" has no exact answer here for a value that is not a square, and a rounded root would be a wrong answer" "a refusal goes to STDOUT, which is a divergence from jq and is asserted so it stays visible"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '2|sqrt' 1>/dev/null)" "" "and writes nothing to stderr, because this runtime has no stderr writer at all"; \
+	assert_out "$$(printf 'null' | ./$(BIN) --version 2>/dev/null)" "oojq 0.1.0" "and the version is on stdout, as it is in jq"; \
 	assert_out "$$(./$(BIN) .name $(TMPDOC) 2>&1 | tr '\n' '|')" '"oojq"|' "reads a named file"; \
 	assert_out "$$(./$(BIN) .name $(TMPDOC) 2>&1 | md5sum)" "$$(echo '$(DOC)' | ./$(BIN) .name 2>&1 | md5sum)" "file and stdin agree byte for byte"; \
 	assert_out "$$(run '.' | md5sum)" "$$(run '.' | md5sum)" "double run is byte identical"; \
@@ -387,7 +447,7 @@ test: build
 	assert_out "$$(echo '{"a":1}' | ./$(BIN) -c '[.a,.a,.a]|add' 2>&1)" '3' "add over a collected array"; \
 	assert_out "$$(echo '{"t":[1,2,3]}' | ./$(BIN) -c '[.t[]|select(.>1)]' 2>&1)" '[2,3]' "select without spaces around the operator"; \
 	assert_out "$$(echo '{"t":[]}' | ./$(BIN) -c '[.t[]|select(.>1)]' 2>&1)" '[]' "select over empty"; \
-	assert_code "$$(echo '{"t":[1]}' | ./$(BIN) '.t|join("-")' >/dev/null 2>&1; echo $$?)" 2 "join still refuses non strings"; \
+	assert_out "$$(echo '{"t":[1.5,2.5]}' | ./$(BIN) '.t|join("|")' 2>&1)" '"1.5|2.5"' "join spells a float member"; \
 	assert_out "$$(echo '{"a":[1,"x",null,true,[2]]}' | ./$(BIN) -c '[.a[]|numbers]' 2>&1)" '[1]' "numbers selects the value in hand"; \
 	assert_out "$$(echo '{"a":[1,"x",null,true,[2]]}' | ./$(BIN) -c '[.a[]|arrays]' 2>&1)" '[[2]]' "arrays selects containers"; \
 	assert_out "$$(echo '{"a":[1,"x",null,true,[2]]}' | ./$(BIN) -c '[.a[]|scalars]' 2>&1)" '[1,"x",null,true]' "scalars leaves containers out"; \
@@ -411,7 +471,254 @@ test: build
 	assert_out "$$(echo 'null' | ./$(BIN) -c '"1970-01-01T00:00:00Z"|fromdate' 2>&1)" '0' "fromdate reads ISO text back"; \
 	assert_out "$$(echo 'null' | ./$(BIN) -c '"2021-3-4T05:06:07Z"|fromdate' 2>&1)" '1614834367' "and a month or day of one digit still parses, as in jq"; \
 	assert_has "$$(echo 'null' | ./$(BIN) -c '"notadate"|fromdate' 2>&1)" 'does not match format' "fromdate refuses a string that is not a date"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"1970-01-01T00:00:00Z"|fromdateiso8601' 2>&1)" '0' "fromdateiso8601 reads ISO text back"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2021-3-4T05:06:07Z"|fromdateiso8601' 2>&1)" '1614834367' "fromdateiso8601 reads short month and day"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"notadate"|fromdateiso8601' 2>&1)" 'does not match format' "fromdateiso8601 refuses a string that is not a date"; \
 	assert_has "$$(echo 'null' | ./$(BIN) -c '"x"|gmtime' 2>&1)" 'gmtime() requires numeric inputs' "gmtime names the kind it was refused on, as jq does"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5,14,30,25]|strftime("%Y-%m-%dT%H:%M:%S")' 2>&1)" '"2015-03-05T14:30:25"' "strftime writes the fields it is given"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5,14,30,25]|strftime("%Y|%y|%C|%m|%d|%e|%j|%H|%I|%M|%S|%p|%a|%A|%b|%B|%u|%w|%U|%W|%G|%V|%z|%Z")' 2>&1)" '"2015|15|20|03|05| 5|064|14|02|30|25|PM|Thu|Thursday|Mar|March|4|4|09|09|2015|10|+0000|GMT"' "strftime answers every base code at once, and %Y is unpadded"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5,14,30,25]|strftime("%c|%D|%F|%R|%T|%r|%x|%X")' 2>&1)" '"Thu 05 Mar 2015 02:30:25 PM GMT|03/05/15|2015-03-05|14:30|14:30:25|02:30:25 PM|03/05/2015|02:30:25 PM"' "the eight composites, with %X as the clock and a half, as jq spells it"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("%F %T")' 2>&1)" '"2015-03-05 00:00:00"' "a composite keeps its place in the format, before the text that follows it"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("a%Yb%Tc%")' 2>&1)" '"a2015b00:00:00c%"' "and so does a composite between two runs of plain text"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("%c%c")' 2>&1)" '"Thu 05 Mar 2015 12:00:00 AM GMTThu 05 Mar 2015 12:00:00 AM GMT"' "a composite repeated twice is expanded twice"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[]|strftime("%F %T")' 2>&1)" '"1899-12-31 00:00:00"' "an empty array is the zeroed struct, so 1900 less a day"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015]|strftime("%F %T")' 2>&1)" '"2014-12-31 00:00:00"' "and a missing month and day are January and the day before the first"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[-1]|strftime("%F")' 2>&1)" '"-2-12-31"' "a year of -1 is a year of -2 once the day before the first is taken off it"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,13,5]|strftime("%Y-%m-%d")' 2>&1)" '"2016-02-05"' "a month past December rolls into the next year"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,12,32]|strftime("%Y-%m-%d")' 2>&1)" '"2016-02-01"' "and so does a day past the end of a month"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5,25,0,0]|strftime("%F %T")' 2>&1)" '"2015-03-06 01:00:00"' "an hour of 25 is one o'clock the next day"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5,0,0,-1]|strftime("%F %T")' 2>&1)" '"2015-03-04 23:59:59"' "and a second of -1 is the last second of the day before"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5,0,-90,0]|strftime("%F %T")' 2>&1)" '"2015-03-04 22:30:00"' "and a negative minute borrows from the hour and the day"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5,0,0,0,9,9]|strftime("%F %T %a %j")' 2>&1)" '"2015-03-05 00:00:00 Thu 064"' "strftime ignores the weekday and day-of-year it is handed"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015.7,2,5]|strftime("%F %T")' 2>&1)" '"2015-03-05 00:00:00"' "a float in a slot truncates, as it does in todate"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '0|strftime("%F %T %a %j %z %Z")' 2>&1)" '"1970-01-01 00:00:00 Thu 001 +0000 GMT"' "a number is seconds since the epoch, and reads in UTC"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '1425565825|strftime("%F %T %a %j")' 2>&1)" '"2015-03-05 14:30:25 Thu 064"' "so a number and the array gmtime makes of it agree"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '-1|strftime("%F %T")' 2>&1)" '"1969-12-31 23:59:59"' "a number one second below the epoch is the day before at the end of it"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '1.9999|strftime("%F %T")' 2>&1)" '"1970-01-01 00:00:01"' "a fraction of a second truncates toward zero"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '1e15|strftime("%Y")' 2>&1)" '"31690708"' "a year too large for a C int is still written out in full"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2016,0,1]|strftime("%G %V")' 2>&1)" '"2015 53"' "ISO week 53 of the year before, because the Thursday is in December"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2017,0,1]|strftime("%G %V")' 2>&1)" '"2016 52"' "and a Sunday 1 January is the last week of the year before"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2018,11,31]|strftime("%G %V")' 2>&1)" '"2019 01"' "and a Monday 31 December is week one of the year after"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2020,11,31]|strftime("%G %V")' 2>&1)" '"2020 53"' "a leap year ends on ISO week 53"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,0,1]|strftime("%Y %C %y")' 2>&1)" '"1 0 01"' "years before the common era keep the century and wrap the two digits"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[500,0,1]|strftime("%Y %y")' 2>&1)" '"500 00"' "a year of 500 is not padded and its two digits are 00"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[-1,0,1]|strftime("%y %C")' 2>&1)" '"99 -1"' "a year of -1 is year 99 of a century of -1"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[10000,0,1]|strftime("%Y %j")' 2>&1)" '"10000 001"' "a year of 10000 is written out and the day of the year is 001"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5,0,0,0]|strftime("%I %p %H")' 2>&1)" '"12 AM 00"' "midnight is twelve in the morning"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5,12,0,0]|strftime("%I %p %H")' 2>&1)" '"12 PM 12"' "and noon is twelve in the afternoon"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("%Q")' 2>&1)" '"%Q"' "a code jq does not know is written out as it stands"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("%")' 2>&1)" '"%"' "a percent with nothing after it stands for itself"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("a%")' 2>&1)" '"a%"' "and so does one at the end of a run of text"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("%%")' 2>&1)" '"%"' "a doubled percent is one percent"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("")' 2>&1)" '""' "an empty format writes an empty string"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"x"|strftime("%F")' 2>&1)" 'strftime/1 requires parsed datetime inputs' "strftime refuses a value that is not a date, in jq's words"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '[2015,"x"]|strftime("%F")' 2>&1)" 'strftime/1 requires parsed datetime inputs' "strftime refuses a slot that is not a number, in jq's words"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime(1)' 2>&1)" 'strftime/1 requires a string format' "strftime refuses a format that is not a string, in jq's words"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("%F %s")' 2>&1)" 'strftime format code %s needs the local UTC offset' "strftime refuses %s, which jq answers in the machine's own timezone"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime("%Y","%m")' 2>&1)" 'takes one value, and the argument written gives several' "strftime refuses a format written as a generator, like index and contains"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '[2015,2,5]|strftime' 2>&1)" '"strftime" needs a literal argument' "strftime refuses to be written with no format at all"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05"|strptime("%Y-%m-%d")' 2>&1)" '[2015,2,5,0,0,0,4,63]' "strptime reads the canonical date back"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05T14:30:25Z"|strptime("%Y-%m-%dT%H:%M:%SZ")' 2>&1)" '[2015,2,5,14,30,25,4,63]' "and the same with a clock and a zone"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05T14:30:25+00:00"|strptime("%Y-%m-%dT%H:%M:%S%z")' 2>&1)" '[2015,2,5,14,30,25,4,63]' "with the offset written in the RFC 3339 way"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05"|strptime("%F")' 2>&1)" '[2015,2,5,0,0,0,4,63]' "%F is %Y-%m-%d, and reads a one digit month"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-3-5"|strptime("%F")' 2>&1)" '[2015,2,5,0,0,0,4,63]' "a one digit month and day are the same date"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05 14:30:25"|strptime("%F %T")' 2>&1)" '[2015,2,5,14,30,25,4,63]' "two composites in one format, in the order they were written"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05T14:30:25Z"|strptime("%FT%TZ")' 2>&1)" '[2015,2,5,14,30,25,4,63]' "and with no separator between them"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"03/05/15"|strptime("%D")' 2>&1)" '[2015,2,5,0,0,0,4,63]' "%D is %m/%d/%y, so two digits of a century"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"03/05/15"|strptime("%x")' 2>&1)" '[15,2,5,0,0,0,4,63]' "%x is %m/%d/%Y, which is the one table that differs, and gives 15"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"03/05/2015"|strptime("%x")' 2>&1)" '[2015,2,5,0,0,0,4,63]' "%x takes a full year where %D would not"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"15-03-05"|strptime("%y-%m-%d")' 2>&1)" '[2015,2,5,0,0,0,4,63]' "%y is two digits of a year, pivoted at 69"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"68"|strptime("%y")' 2>&1)" '[2068,0,0,0,0,0,6,-1]' "so 68 is this century"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"69"|strptime("%y")' 2>&1)" '[1969,0,0,0,0,0,2,-1]' "and 69 is the last"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"20 15"|strptime("%C %y")' 2>&1)" '[2015,0,0,0,0,0,3,-1]' "%C writes the century outright"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"19 99"|strptime("%C %y")' 2>&1)" '[1999,0,0,0,0,0,4,-1]' "and a %y after it overwrites the century"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015"|strptime("%Y")' 2>&1)" '[2015,0,0,0,0,0,3,-1]' "a bare %Y leaves the day of the year at minus one, the day before the first"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"Mar"|strptime("%b")' 2>&1)" '[1900,2,0,0,0,0,3,58]' "a bare %b is enough to place the day of the year"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"March 5 2015"|strptime("%B %d %Y")' 2>&1)" '[2015,2,5,0,0,0,4,63]' "a full month name reads as well as its first three letters"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"December 5 2015"|strptime("%B %d %Y")' 2>&1)" '[2015,11,5,0,0,0,6,338]' "and the longest name is not cut to three letters"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"Thu, 05 Mar 2015 14:30:25 GMT"|strptime("%a, %d %b %Y %H:%M:%S %Z")' 2>&1)" '[2015,2,5,14,30,25,4,63]' "the whole of an RFC 822 date, in words"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"Thursday, 05 December 2015 14:30:25 GMT"|strptime("%A, %d %B %Y %H:%M:%S %Z")' 2>&1)" '[2015,11,5,14,30,25,4,338]' "with every name spelled out"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05T14:30:25+0000"|strptime("%Y-%m-%dT%H:%M:%S%z")' 2>&1)" '[2015,2,5,14,30,25,4,63]' "an offset of four digits and no colon"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05T14:30:25+05:30"|strptime("%Y-%m-%dT%H:%M:%S%z")' 2>&1)" '[2015,2,5,14,30,25,4,63]' "and of two, a colon, and two"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015 064"|strptime("%Y %j")' 2>&1)" '[2015,2,5,0,0,0,4,63]' "a day of the year is a month and a day when the year is named"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015 366"|strptime("%Y %j")' 2>&1)" '[2015,24,31,0,0,0,5,365]' "a day past the end of the year is jq's month of 24 and its last day"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"1900 366"|strptime("%Y %j")' 2>&1)" '[1900,24,31,0,0,0,2,365]' "and the weekday still comes from the real date, which is in the next year"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2016 366"|strptime("%Y %j")' 2>&1)" '[2016,11,31,0,0,0,6,365]' "in a leap year the 366th day is an ordinary December 31"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"366 2016"|strptime("%j %Y")' 2>&1)" '[2016,11,31,0,0,0,6,365]' "the day of the year sees a year written after it"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015 064 9"|strptime("%Y %j %d")' 2>&1)" '[2015,2,9,0,0,0,1,63]' "%j fills in the month and %d the day, whichever is written first"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015 9 064"|strptime("%Y %d %j")' 2>&1)" '[2015,2,9,0,0,0,1,63]' "and the same two the other way round give the same date"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015 12 031"|strptime("%Y %m %j")' 2>&1)" '[2015,11,31,0,0,0,4,30]' "a month named leaves %j to fill in only the day"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015 12 366"|strptime("%Y %m %j")' 2>&1)" '[2015,11,31,0,0,0,4,365]' "and a day past that month clamps to its last day"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015 7"|strptime("%Y %u")' 2>&1)" '[2015,0,0,0,0,0,0,-1]' "%u counts seven days to Sunday, and Sunday is zero"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015 6"|strptime("%Y %w")' 2>&1)" '[2015,0,0,0,0,0,6,-1]' "%w counts from Sunday already"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05T14:30:25Z"|strptime("%Y-%m-%dT%H:%M:%SZ")|strftime("%F %T")' 2>&1)" '"2015-03-05 14:30:25"' "what strptime reads, strftime writes"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05T14:30:25Z"|strptime("%Y-%m-%dT%H:%M:%SZ")|mktime' 2>&1)" '1425565825' "and it is the same instant mktime made"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05T14:30:25Z"|strptime("%Y-%m-%dT%H:%M:%SZ")|mktime|strftime("%F %T %Z %z")' 2>&1)" '"2015-03-05 14:30:25 GMT +0000"' "so a read and a write round trip through the epoch"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015- 3- 5"|strptime("%Y-%m-%d")' 2>&1)" '[2015,2,5,0,0,0,4,63]' "a numeric directive skips the blanks in front of it"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"2015-03-05 14:30:25 GMT"|strptime("%F %T %Z")' 2>&1)" '[2015,2,5,14,30,25,4,63]' "a zone name runs to the next blank"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"14:30:25"|strptime("%H:%M:%S")' 2>&1)" 'names no date' "a format naming no date is refused, because jq leaves the weekday and the yearday as its C stack held it"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"14"|strptime("%H")' 2>&1)" 'names no date' "and so is a format naming only a clock, the same way"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"2015 extra"|strptime("%Y")' 2>&1)" 'leaves " extra" unread' "unread text is refused, where jq answers with a ninth element holding a string"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"2015-03-05 extra"|strptime("%F")' 2>&1)" 'leaves " extra" unread' "and the same through a composite"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"13:30:25"|strptime("%X")' 2>&1)" 'does not match format' "an hour %I cannot hold is refused, where jq answers a ninth element"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"02015"|strptime("%Y")' 2>&1)" 'leaves "5" unread' "a year is four digits wide, so the fifth is left over and refused"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"2015-03-05x"|strptime("%Y-%m-%d")' 2>&1)" 'leaves "x" unread' "a literal that does not match leaves the rest of the text unread"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"2015-03-05"|strptime("%c")' 2>&1)" 'does not match format' "%c cannot be read back, so it is refused the way jq refuses it"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"2015"|strptime("%%")' 2>&1)" 'does not match format' "a doubled percent is not a directive when reading"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"2015"|strptime("%Q")' 2>&1)" 'does not match format' "and neither is a code jq does not know";  echo $$pass $$fail >> $(CNT);
+	@$(SUITE_FNS) \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"2015-03-05"|strptime' 2>&1)" 'needs a literal argument' "strptime will not do without a format"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"2015-03-05"|strptime("%Y-%m-%d","%H")' 2>&1)" 'takes one value' "and a format written as a generator is refused, like index and contains"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '1|strptime("%Y")' 2>&1)" 'requires string inputs' "a number is not text to read"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"2015-03-05"|strptime(1)' 2>&1)" 'requires string inputs' "and a format that is not a string is not a format"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abcabc"|indices("b")' 2>&1)" '[1,4]' "indices finds every place, not just the first"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abcabc"|indices("bc")' 2>&1)" '[1,4]' "and every place a longer needle sits"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abcabc"|indices("a")' 2>&1)" '[0,3]' "including the first"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abcabc"|indices("z")' 2>&1)" '[]' "a needle that is not there is an empty answer and not a null one"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abcabc"|indices("")' 2>&1)" '[]' "and so is an empty needle"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|indices("abc")' 2>&1)" '[0]' "a needle as long as the text matches once"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"aaaa"|indices("aa")' 2>&1)" '[0,1,2]' "overlaps count, because the scan steps one character at a time"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"aaa"|indices("aa")' 2>&1)" '[0,1]' "so a shorter text overlaps too"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"ababab"|indices("abab")' 2>&1)" '[0,2]' "and the last overlap is found as well"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,1,2]|indices(1)' 2>&1)" '[0,2]' "over an array it is every member equal to the needle"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,1,2]|indices(2)' 2>&1)" '[1,3]' "for the last value as well as the first"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,3]|indices(9)' 2>&1)" '[]' "and a member that is not there is empty"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[]|indices(1)' 2>&1)" '[]' "an empty array has no members to find"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '["ab","cd","ab"]|indices("ab")' 2>&1)" '[0,2]' "an array of strings is searched by value"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[{"a":1},{"a":1}]|indices({"a":1})' 2>&1)" '[0,1]' "and an object member compares by value"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[{"a":[1]},{"a":[1]}]|indices({"a":[1]})' 2>&1)" '[0,1]' "even when the object holds an array"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[null,null]|indices(null)' 2>&1)" '[0,1]' "a null needle is a needle like any other"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|indices("a")' 2>&1)" 'null' "a null input is null, as it is for index"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,null]|index(null)' 2>&1)" '1' "and a null needle over an array still finds the null"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abcabc"|index("b")' 2>&1)" '1' "index is indices with a first answer"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abcabc"|rindex("b")' 2>&1)" '4' "and rindex with a last one"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,1,2]|index(1)' 2>&1)" '0' "over an array as well"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,1,2]|rindex(1)' 2>&1)" '2' "for the last one too"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"héllo"|indices("l")' 2>&1)" '[2,3]' "a search is counted in characters and not in bytes"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"日本語"|indices("本")' 2>&1)" '[1]' "three wide characters and still one index"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '""|split("b")' 2>&1)" '[]' "an empty string split on a non empty separator is no pieces and not one empty piece"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '""|split("")' 2>&1)" '[]' "and an empty separator over an empty string agrees as well"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"a"|split("a")' 2>&1)" '["",""]' "a separator that is the whole text gives the two empty ends"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|split("d")' 2>&1)" '["abc"]' "a separator that is not there leaves the text whole"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '1|"abc"|startswith("b")' 2>&1)" 'false' "a pipeline hands startswith the string, not the number it started from"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|"abc"|endswith("b")' 2>&1)" 'false' "and endswith the same, which is why the number before the pipe is not refused"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1]|"abc"|test("b")' 2>&1)" 'true' "and test matches a string that arrived through a pipe from an array"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|split("b")' 2>&1)" '["a","c"]' "a string needle against a string still splits"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|split("")' 2>&1)" '["a","b","c"]' "and an empty separator still splits into characters"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|startswith("a")' 2>&1)" 'true' "a matching prefix is still true"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|startswith("z")' 2>&1)" 'false' "and a non matching one is still false"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|endswith("c")' 2>&1)" 'true' "as is a matching suffix"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|ltrimstr("a")' 2>&1)" '"bc"' "a prefix is still trimmed"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|ltrimstr("z")' 2>&1)" '"abc"' "and a prefix that is not there leaves the text alone"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|rtrimstr("c")' 2>&1)" '"ab"' "a suffix is still trimmed"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|test("b")' 2>&1)" 'true' "test still matches"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"abc"|test("z")' 2>&1)" 'false' "and still does not match"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"héllo"|startswith("hé")' 2>&1)" 'true' "a multi character prefix is compared in characters"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '"日本語"|split("本")' 2>&1)" '["日","語"]' "and a wide separator splits at the right place"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|startswith(1)' 2>&1)" 'startswith() requires string inputs' "a number needle against a string is refused in jq's words"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|endswith(1)' 2>&1)" 'endswith() requires string inputs' "and one for endswith"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|ltrimstr(1)' 2>&1)" 'startswith() requires string inputs' "ltrimstr borrows the sentence of the startswith it is built from"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|rtrimstr(1)' 2>&1)" 'endswith() requires string inputs' "and rtrimstr the one of endswith"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|split(1)' 2>&1)" 'split input and separator must be strings' "split names its own operation"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|index(1)' 2>&1)" 'Cannot index string with number' "index names the indexing rule instead"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|rindex(1)' 2>&1)" 'Cannot index string with number' "as does rindex"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|indices(1)' 2>&1)" 'Cannot index string with number' "and indices"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|indices(null)' 2>&1)" 'Cannot index string with null' "for a null needle as well"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|test(1)' 2>&1)" 'number not a string or array' "test names the kind it was given rather than the operation"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|test(true)' 2>&1)" 'boolean not a string or array' "for a boolean needle as well"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|test(1.5)' 2>&1)" 'number not a string or array' "and for a float, which jq also calls a number"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '1|startswith("b")' 2>&1)" 'startswith() requires string inputs' "a string needle against a number is refused too"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c 'null|endswith("b")' 2>&1)" 'endswith() requires string inputs' "as is one against a null"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '[1]|test("b")' 2>&1)" 'cannot be matched, as it is not a string' "and test over an array, with the value named in the sentence"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '[1,2]|contains(1)' 2>&1)" 'cannot have their containment checked' "contains keeps its own refusal, which was already right"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|index' 2>&1)" 'needs a literal argument' "a builtin jq has no zero argument form of is refused rather than answering null"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|indices' 2>&1)" 'needs a literal argument' "and so is the new one"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|split' 2>&1)" 'needs a literal argument' "as are the rest of the string operations"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|startswith' 2>&1)" 'needs a literal argument' "one by one, with the name in the sentence"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|test' 2>&1)" 'needs a literal argument' "including test"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abcabc"|indices("a","b")' 2>&1)" 'takes one value' "a needle written as a generator is refused, as it is for index and contains"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '[1,2]|indices(1,2)' 2>&1)" 'takes one value' "and over an array as well"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '{"a":1}|indices("a")' 2>&1)" 'is not supported' "an object is refused, because jq gives three answers there and not one rule"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|test(["b"])' 2>&1)" 'needs a scalar literal argument' "an array needle is a missing feature and is still refused for not being a scalar"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|index("a")' 2>&1)" 'null' "a null input answers null for a string needle"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|index(1)' 2>&1)" 'null' "and for a number needle"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|index(1.5)' 2>&1)" 'null' "and for a float, which is a number too"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|index({})' 2>&1)" 'null' "and for an object, which reads as a name"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|rindex("a")' 2>&1)" 'null' "rindex is the same shape"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|rindex(1)' 2>&1)" 'null' "for a number as well"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|indices("a")' 2>&1)" 'null' "and indices is too"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c 'null|indices(1)' 2>&1)" 'null' "for a number"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,null]|index(null)' 2>&1)" '1' "a null needle finds the null in an array"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,null]|rindex(null)' 2>&1)" '1' "for rindex as well"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,null]|indices(null)' 2>&1)" '[1]' "and indices finds it as well"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1]|index(1)' 2>&1)" '0' "an array is searched by value and not by position"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[]|index(1)' 2>&1)" 'null' "and an empty array has no member for index to find"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[[1]]|index(1)' 2>&1)" 'null' "and a member that is itself an array never matches"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,3]|add' 2>&1)" '6' "add sums the members"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[]|add' 2>&1)" 'null' "an empty array sums to null"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2]|add' 2>&1)" '3' "and two members sum to three"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '["a","b"]|add' 2>&1)" '"ab"' "strings do not sum and are refused rather than answered"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[[1,2],[3]]|add' 2>&1)" '[1,2,3]' "nor do arrays, which jq also refuses"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '{"a":1}|add' 2>&1)" '1' "an object sums its values"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,3]|add(.)' 2>&1)" '[1,2,3]' "add reads its filter as a collect of the whole input, not a member sum"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[]|add(.)' 2>&1)" '[]' "an empty input collects the filter once and sums a one member array"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[[1,2],[3]]|add(length)' 2>&1)" '2' "a body that answers a number is summed, not the members"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2]|add(1)' 2>&1)" '1' "a literal filter is a filter as well"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '1|add("b")' 2>&1)" '"b"' "a string body over a scalar is collected too"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,3]|add(.[])' 2>&1)" '6' "a body that iterates collects the members it walked"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2]|add(.[0], .[1])' 2>&1)" '3' "a top level comma is one argument holding a generator"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,3]|add(empty)' 2>&1)" 'null' "an empty collect is an empty array, and an empty array sums to null"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[1,2,3]|add(.[] | .+1)' 2>&1)" '9' "a body with a pipe collects the values it piped"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[range(0;5)]|add(.)' 2>&1)" '[0,1,2,3,4]' "a collect of the whole input is that input, one member"; \
+	assert_out "$$(echo 'null' | ./$(BIN) -c '[[1],[2]]|add(.)' 2>&1)" '[[1],[2]]' "one member of an array is the array, so nothing is summed away"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '[1,2,3]|add(.;.)' 2>&1)" 'add/2' "a semicolon is a second argument and jq has no add/2"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'length("x")' 2>&1)" 'length/1 is not defined' "length takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'tostring("x")' 2>&1)" 'tostring/1 is not defined' "tostring takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'tonumber("x")' 2>&1)" 'tonumber/1 is not defined' "tonumber takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'type("x")' 2>&1)" 'type/1 is not defined' "type takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'keys("x")' 2>&1)" 'keys/1 is not defined' "keys takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'sort("x")' 2>&1)" 'sort/1 is not defined' "sort takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'reverse("x")' 2>&1)" 'reverse/1 is not defined' "reverse takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'unique("x")' 2>&1)" 'unique/1 is not defined' "unique takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'floor("x")' 2>&1)" 'floor/1 is not defined' "floor takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'sqrt("x")' 2>&1)" 'sqrt/1 is not defined' "sqrt takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'tojson("x")' 2>&1)" 'tojson/1 is not defined' "tojson takes no argument in jq, so a body after it is refused"; \
+	assert_has "$$(printf 'null' | ./$(BIN) 'values("x")' 2>&1)" 'values/1 is not defined' "values takes no argument in jq, so a body after it is refused"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1]|first(1)' 2>&1)" '1' "first still takes a body, and the arity guard does not touch it"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1]|last(1)' 2>&1)" '1' "and last does not either"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1]|map(1+0)' 2>&1)" '[1]' "nor map"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1]|any(true)' 2>&1)" 'true' "nor any"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c '[1]|sort_by(.)' 2>&1)" '[1]' "nor sort_by"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c 'true|contains(true)' 2>&1)" 'true' "a boolean contains itself"; \
+	assert_out "$$(printf 'null' | ./$(BIN) -c 'false|contains(false)' 2>&1)" 'true' "and the other boolean contains itself"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c 'true|contains(false)' 2>&1)" 'cannot have their containment checked' "but neither contains the other"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c 'false|contains(true)' 2>&1)" 'cannot have their containment checked' "in either direction"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 as $x | $x' 2>&1)" 'binding a variable with "as" is not supported' "as after an expression is refused by name, as it is at the start of a filter"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 reduce . as $x (0;.)' 2>&1)" '"reduce" is not supported' "and so is every other reserved word wherever it turns up"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 def f: 1; f' 2>&1)" '"def" is not supported' "def among them"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 foreach . as $x (0;.)' 2>&1)" '"foreach" is not supported' "foreach among them"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 label $out | 1' 2>&1)" '"label" is not supported' "label among them"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 import "x" as y; 1' 2>&1)" '"import" is not supported' "and import, which is the one that names a file rather than a construct"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 try .' 2>&1)" '"try" is not supported' "and try, which keeps pointing at the question mark instead"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '1 2' 2>&1)" 'unexpected' "a leftover that is not a reserved word keeps the generic parse error"; \
+	assert_has "$$(printf 'null' | ./$(BIN) -c '.a b' 2>&1)" 'unexpected' "so a real syntax error is not hidden behind a sentence about a feature"; \
+	assert_has "$$(echo '{"a":1}' | ./$(BIN) '.a //= 9' 2>&1)" 'right hand side eagerly' "//= is refused, and the refusal names why rather than saying it is unimplemented"; \
+	assert_has "$$(echo '{"a":1}' | ./$(BIN) '.a //= empty' 2>&1)" 'answers nothing' "because jq answers nothing there and a rewrite to |= would answer 1"; \
+	assert_has "$$(echo '{"a":1}' | ./$(BIN) '.a //= 9' 2>&1)" 'silently wrong' "and the same rewrite is silently wrong for an impure right hand side"; \
+	assert_out "$$(echo '{"a":1}' | ./$(BIN) -c '.a |= (. // 9)' 2>&1)" '{"a":1}' "so the |= spelling is the one this build does support"; \
+	assert_out "$$(echo '{"a":1,"b":null}' | ./$(BIN) -c '.b |= (. // 9)' 2>&1)" '{"a":1,"b":9}' "and it fills a null the way jq fills it"; \
+	assert_out "$$(echo '{"a":1,"d":0,"e":""}' | ./$(BIN) -c '.d |= (. // 9)' 2>&1)" '{"a":1,"d":0,"e":""}' "leaving a zero alone, because zero is truthy in jq"; \
+	assert_out "$$(echo '{"a":1,"e":""}' | ./$(BIN) -c '.e |= (. // 9)' 2>&1)" '{"a":1,"e":""}' "and an empty string, for the same reason"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c 'null|index(true)' 2>&1)" 'Cannot index null with boolean' "a boolean needle over a null is refused"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c 'null|index(null)' 2>&1)" 'Cannot index null with null' "and so is a null needle"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c 'null|index([])' 2>&1)" 'Cannot index null with array' "and an array needle"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c 'null|rindex(true)' 2>&1)" 'Cannot index null with boolean' "the same for rindex"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c 'null|indices(true)' 2>&1)" 'Cannot index null with boolean' "and for indices"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|index(1)' 2>&1)" 'Cannot index string with number' "a number needle over a string is refused"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|indices(1)' 2>&1)" 'Cannot index string with number' "for indices as well"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|startswith(1)' 2>&1)" 'startswith() requires string inputs' "and startswith names its own operation"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|split(1)' 2>&1)" 'split input and separator must be strings' "as does split"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c '"abc"|test(1)' 2>&1)" 'number not a string or array' "and test names the kind it was given"; \
 	assert_out "$$(echo '{"s":"abc"}' | ./$(BIN) -c '.s|explode' 2>&1)" '[97,98,99]' "explode is code points"; \
 	assert_out "$$(echo 'null' | ./$(BIN) -c '[104,105]|implode' 2>&1)" '"hi"' "implode is the inverse"; \
 	assert_out "$$(echo '{"s":"abc"}' | ./$(BIN) -c '.s|index("b")' 2>&1)" '1' "index finds a substring"; \
@@ -631,7 +938,8 @@ test: build
 	assert_out "$$(printf '%s' '1e2' | ./$(BIN) -c '1e2|sqrt' 2>&1)" '10' "a written exponent is read before the root is taken"; \
 	assert_out "$$(printf '%s' '-4' | ./$(BIN) -c '-4|sqrt' 2>&1)" 'null' "a negative has no real root, and jq writes null"; \
 	assert_code "$$(printf '%s' '2' | ./$(BIN) '2|sqrt' >/dev/null 2>&1; echo $$?)" 2 "sqrt of a value that is not a square is refused"; \
-	assert_has "$$(printf '%s' '2' | ./$(BIN) '2|sqrt' 2>&1)" 'not a square' "and it says which shape would have worked"; \
+	assert_has "$$(printf '%s' '2' | ./$(BIN) '2|sqrt' 2>&1)" 'not a square' "and it says which shape would have worked";  echo $$pass $$fail >> $(CNT);
+	@$(SUITE_FNS) \
 	assert_code "$$(printf '%s' '0.5' | ./$(BIN) '0.5|sqrt' >/dev/null 2>&1; echo $$?)" 2 "an odd count of decimal places has no decimal root"; \
 	assert_code "$$(printf '%s' '10' | ./$(BIN) '10|sqrt' >/dev/null 2>&1; echo $$?)" 2 "ten is not a square and is refused rather than rounded"; \
 	assert_has "$$(printf '%s' '"a"' | ./$(BIN) '"a"|sqrt' 2>&1)" 'string ("a") number required' "sqrt names a non number the way jq does"; \
@@ -811,7 +1119,6 @@ test: build
 	assert_out "$$(printf '%s' 'null' | ./$(BIN) -c '(1,2,3) - (100,200)' 2>&1 | tr '\n' '|')" '-99|-98|-97|-199|-198|-197|' "and the same order for subtraction"; \
 	assert_out "$$(printf '%s' 'null' | ./$(BIN) -c '(100,200) + (1,2,3)' 2>&1 | tr '\n' '|')" '101|201|102|202|103|203|' "and it is not simply the order written"; \
 	printf '%s' '{"a":[10,20,30],"b":{"z":1,"a":2},"items":[{"id":1,"k":"a"},{"id":2,"k":"b"}]}' > $(TMPDOC); \
-	t() { ./$(BIN) -c "$$1" $(TMPDOC) 2>&1 | tr '\n' '@'; }; \
 	assert_out "$$(t '[1,2]|keys')" '[0,1]@' "keys on an array is numbers, not text"; \
 	assert_out "$$(t '.a|keys')" '[0,1,2]@' "and they are the positions, in order"; \
 	assert_out "$$(t '.b|keys')" '["a","z"]@' "while an object is still its own names"; \
@@ -834,7 +1141,6 @@ test: build
 	assert_out "$$(t '(.items[0],.b)|.z?')" 'null@1@' "a question mark keeps the values that can take the step"; \
 	assert_out "$$(t '(.items[0],.b)|.id?')" '1@null@' "and only the ones that cannot are left out"; \
 	assert_out "$$(t '[(.items[]|tojson|fromjson)]|length')" '2@' "fromjson keeps the arena its collect is building in"; \
-	d() { printf '%s' "$$1" > $(DUPDOC); ./$(BIN) -c "$$2" $(DUPDOC) 2>&1 | tr '\n' '@'; }; \
 	assert_out "$$(d '{"a":1,"a":2}' '.')" '{"a":2}@' "a name written twice keeps the value it was last given"; \
 	assert_out "$$(d '{"a":1,"a":2}' 'keys')" '["a"]@' "and the object holds that name once"; \
 	assert_out "$$(d '{"a":1,"a":2}' 'length')" '1@' "so its length counts the name once"; \
@@ -960,9 +1266,20 @@ test: build
 	assert_bytes "$$(d 'null' '.[]?' | wc -c | tr -d ' ')" 0 "and it swallows a null one as well"; \
 	assert_has "$$(d 'null' 'with_entries')" 'needs a filter argument' "a bare with_entries says it wants an argument"; \
 	assert_has "$$(d 'null' 'limit')" 'needs a filter argument' "and so does a bare limit, which exists too"; \
-	rm -f $(TMPDOC) $(DUPDOC); \
-	if [ $$fail -gt 0 ]; then echo ""; echo "FAIL: $$fail of $$((pass+fail)) tests failed"; exit 1; fi; \
-	echo ""; echo "PASS: $$((pass+fail))/$$((pass+fail)) behaviour tests hold"
+	assert_has "$$(python3 -c "print('['*600 + ']'*600)" | ./$(BIN) . 2>&1)" 'exceeds maximum nesting depth limit' "payload exceeding nesting depth limit is refused"; \
+	assert_has "$$(echo 'null' | ./$(BIN) -c "$$(python3 -c "print('('*300 + '.' + ')'*300)")" 2>&1)" 'exceeds maximum nesting depth limit' "filter exceeding nesting depth limit is refused"; \
+	assert_has "$$(echo '1' | ./$(BIN) -c 'recurse(.)' 2>&1)" 'recurse exceeded maximum depth limit' "infinite recurse generator is stopped at depth limit"; \
+	assert_has "$$(echo '1' | ./$(BIN) -c '(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)|(.,.)' 2>&1)" 'stream size limit exceeded' "combinatorial stream explosion is stopped at size ceiling"; \
+	assert_has "$$(echo '{"jsonrpc":"2.0","method":"initialize","id":1}' | head -c 10 | ./$(BIN) --mcp 2>&1)" 'truncated frame at end of input' "mcp loop handles truncated input safely"; \
+	assert_has "$$(printf 'Content-Length: 20000000\r\n\r\n' | ./$(BIN) --mcp 2>&1)" 'frame size exceeds limit' "mcp loop enforces frame size ceiling"; \
+	assert_has "$$(python3 -c "print('x'*100000)" | ./$(BIN) --mcp 2>&1 | head -n 3)" 'frame buffer ceiling exceeded' "mcp loop enforces frame buffer ceiling"; \
+	assert_has "$$(echo 1 | ./$(BIN) -c "$$(python3 -c "print('+'.join(['1']*4000))")" 2>&1)" 'exceeds maximum nesting depth limit' "filter with deeply chained additions is refused cleanly"; \
+	assert_out "$$(printf '%s\n' '{"a": "\u0022"}' | ./$(BIN) -c . 2>&1)" '{"a":"\""}' "u0022 in string decodes to quote"; \
+	assert_out "$$(printf '%s\n' '{"a": "\u005c"}' | ./$(BIN) -c . 2>&1)" '{"a":"\\"}' "u005c in string decodes to backslash"; \
+	assert_has "$$(printf 'Content-Length: 100\r\n\r\n{"short":' | ./$(BIN) --mcp 2>&1)" '"code":-32700' "mcp loop emits json-rpc error frame on framed truncation";  echo $$pass $$fail >> $(CNT);
+	@rm -f $(TMPDOC) $(DUPDOC);
+	@awk '{p+=$$1; f+=$$2} END { if (f>0) { print ""; print "FAIL: " f " of " (p+f) " tests failed"; exit 1 } else { print ""; print "PASS: " (p+f) "/" (p+f) " behaviour tests hold" } }' $(CNT);
+	@rm -f $(CNT)
 
 verify: line-cap file-law academy density suggest-audit dead-tests dup-names test check
 
@@ -977,17 +1294,27 @@ verify: line-cap file-law academy density suggest-audit dead-tests dup-names tes
 # A case where both binaries agree counts as a pass even when neither printed
 # anything, so an exit status of 1, which here means the filter selected
 # nothing, is not mistaken for a refusal. A status of 2 or more is a refusal and
-# is counted as unsupported. A case where both answer and disagree is reported
-# on its own line rather than folded into either total, because silently
+# is counted as unsupported, and it is also printed, once, with the reason the
+# binary gave. A count alone cannot be checked: the refusal list in the README
+# is a claim about which boundaries were drawn on purpose, and a number that
+# only ever appears as a total is a number nobody can hold to. The reason is
+# read from stdout rather than stderr, because oojq writes its errors to stdout
+# where jq writes to stderr; that divergence is recorded in the README and
+# pinned by assertions, and reading stderr here would print a blank line for
+# every case. A case where both answer and disagree is reported on its own line
+# rather than folded into either total, because silently
 # dropping it is how a number stops meaning anything.
 
 PARITY_DOC = /tmp/oojq_parity_doc.json
 PARITY_CASES = /tmp/oojq_parity_cases.txt
+PARITY_REJECTS = /tmp/oojq_parity_rejects.txt
+SWEEP_REJECTS = /tmp/oojq_sweep_rejects.txt
 
 parity: build
 	@if ! command -v jq >/dev/null 2>&1; then \
 	  echo "SKIP: jq is not installed, so there is nothing to compare against"; exit 0; \
 	fi; \
+	: > $(PARITY_REJECTS); \
 	printf '%s\n' '{"name":"api","port":8080,"ratio":1.5,"neg":-7,"zero":0,"ok":true,"off":false,"nothing":null,"tags":["prod","edge"],"limits":{"rps":500,"burst":750},"items":[{"id":1,"k":"a"},{"id":2,"k":"b"},{"id":3,"k":"a"}],"txt":"Hello World","esc":"a\"b\\c\nd\te","utf":"h\u00e9llo","nest":[[1,2],[3],[]]}' > $(PARITY_DOC); \
 	printf '%s\n' '.' '.name' '.missing' '.ratio' '.neg' '.nothing' '.ok' '.tags' '.tags[]' \
 	 'limit(2; 1,2,3)' 'limit(0; 1,2,3)' 'limit(5; 1,2,3)' '[limit(3; .items[])]' '[limit(2; empty)]' 'limit(1; .items[])' \
@@ -1026,6 +1353,24 @@ parity: build
 	 '.items|length' '[range(3)]' '.ratio + 1' '.port * 2' '.port - 8' '.port / 2' '.port % 7' \
 	 '.neg|abs' '.ratio|floor' '.ratio|ceil' '.tags|join("-")' '.tags|sort' '.tags|reverse' \
 	 '.tags|unique' '.items|group_by(.k)' '.items|map(.id)|add' '.items|map(.id)|max' \
+	 '[.items[]|.id]|add(.)' '[.items[]|.id]|add(.[])' '[.items[]|.k]|add(.)' \
+	 '[.tags[]]|add(.)' '[.tags[]]|add(length)' 'add(.)' 'add(.a)' \
+	 '[.items[]|.id]|add(.[0], .[1])' '[.items[]|.id]|add(empty)' \
+	 '[.items[]|.id]|add(.[] | .*2)' '[[.tags]]|add(.)' '[.limits[]]|add(.)' \
+	 '[.items[]|.id]|add(.;.)' '[.txt]|add(.)' '[.nothing]|add(.)' \
+	 '.items|has(0)' '.items|has(2)' '.items|has(3)' '.items|has(-1)' '.items|has(0.5)' \
+	 '.items|has(2.5)' '[]|has(0)' 'null|has(0)' 'null|has("a")' 'has(0)' \
+	 '.limits|has("rps")' '.limits|has("zzz")' '[1,2,3]|join(",")' '[1,null,true]|join(",")' \
+	 '[1.5,2.5]|join("|")' '.limits|join(",")' '{}|join(",")' '["a","b"]|join(null)' \
+	 '[]|join(",")' '[null]|join(",")' '{"b":2,"a":1}|join(",")' '["x",1,true,null]|join("+")' \
+	 '.items[0]|join(",")' \
+	 'length("x")' 'tostring("x")' 'tonumber("x")' 'type("x")' 'keys("x")' \
+	 'sort("x")' 'reverse("x")' 'unique("x")' 'floor("x")' 'tojson("x")' \
+	 'true|contains(true)' 'false|contains(false)' 'true|contains(false)' \
+	 'false|contains(true)' '[.tags[]]|first(.)' '[.tags[]]|last(.)' \
+	 '1 as $$x | $$x' 'as $$x' '.a as $$x | .' \
+	 '.a //= 9' '.b //= 9' '.d //= 9' '.e //= 9' '.a //= (empty)' \
+	 '.a |= (. // 9)' '.d |= (. // 9)' '.e |= (. // 9)' '[.a,.b,.d]|map(. // 9)' \
 	 '.items|map(.id)|min' '.tags|contains(["prod"])' '.txt|ascii_downcase' \
 	 '.txt|startswith("Hello")' '.txt|endswith("World")' '.txt|test("World")' \
 	 '.txt|ltrimstr("Hello ")' '.items|to_entries' '.items|from_entries' \
@@ -1044,6 +1389,7 @@ parity: build
 	 '[.items[]|arrays]' '[.items[]|objects]' '[.items[]|scalars]' '[.items[]|iterables]' \
 	 '.nest|flatten' '.nest|flatten(1)' '.nest|flatten(0)' '[.nest[]|flatten]' \
 	 'tojson' '.limits|tojson' '.nothing|tojson' '"[1,2]"|fromjson' '"{\"a\":1}"|fromjson' \
+	 '"1970-01-01T00:00:00Z"|fromdateiso8601' '"2021-07-14T02:40:00Z"|fromdateiso8601' \
 	 '.utf' '.utf|length' '.utf|explode' '[104,105]|implode' '.utf|index("l")' \
 	 '.utf|rindex("l")' '.utf|index("z")' '.utf|tojson' '.txt|index("World")' \
 	 '[.tags[]|.]|tojson' '.utf|ascii_downcase' '.esc|length' \
@@ -1057,6 +1403,43 @@ parity: build
 	 '.tags|sort|join("-")' '.tags|unique|join("-")' '.tags|reverse|first(.)' \
 	 '.items|sort_by(.k)|map(.k)' '.items|group_by(.k)|map(length)' \
 	 '.txt|test("[A-Z]")' '.txt|test("z")' \
+	 '[2015,2,5,14,30,25]|strftime("%F %T")' '[2015,2,5,14,30,25]|strftime("%c")' \
+	 '[2015,2,5]|strftime("%a %A %b %B %j %u %w %U %W %G %V %z %Z")' \
+	 '0|strftime("%F %T")' '1425565825|strftime("%Y-%m-%d %H:%M:%S")' \
+	 '1500000000|gmtime|strftime("%Y/%m/%d %H:%M:%S %j")' \
+	 '[2015,2,5,25,70,70]|strftime("%F %T")' '[-1,0,1]|strftime("[%Y][%y][%C]")' \
+	 '[2015,2,5]|strftime("%D%T%r%x%X")' '[2015,2,5]|strftime("%Q%%a%")' \
+	 '[2016,0,1]|strftime("%G %V")' '[2017,0,1]|strftime("%G %V")' \
+	 '[2015,2,5]|strftime("%Y","%m")' '"x"|strftime("%F")' \
+	 '[2015,"x"]|strftime("%F")' '[2015,2,5]|strftime(1)' '[2015,2,5]|strftime' \
+	 '[2015,2,5]|strftime("%F %s")' \
+	 '"2015-03-05"|strptime("%Y-%m-%d")' '"2015-03-05T14:30:25Z"|strptime("%Y-%m-%dT%H:%M:%SZ")' '"2015-03-05T14:30:25+05:30"|strptime("%Y-%m-%dT%H:%M:%S%z")' \
+	 '"2015-03-05"|strptime("%F")' '"2015-03-05 14:30:25"|strptime("%F %T")' '"2015-03-05T14:30:25Z"|strptime("%FT%TZ")' \
+	 '"03/05/15"|strptime("%D")' '"03/05/15"|strptime("%x")' '"15-03-05"|strptime("%y-%m-%d")' \
+	 '"68"|strptime("%y")' '"69"|strptime("%y")' '"20 15"|strptime("%C %y")' \
+	 '"Mar 5 2015"|strptime("%b %d %Y")' '"December 5 2015"|strptime("%B %d %Y")' '"Thu, 05 Mar 2015 14:30:25 GMT"|strptime("%a, %d %b %Y %H:%M:%S %Z")' \
+	 '"2015 064"|strptime("%Y %j")' '"2015 366"|strptime("%Y %j")' '"1900 366"|strptime("%Y %j")' \
+	 '"2016 366"|strptime("%Y %j")' '"2015 064 9"|strptime("%Y %j %d")' '"2015 12 031"|strptime("%Y %m %j")' \
+	 '"2015 7"|strptime("%Y %u")' '"2015 6"|strptime("%Y %w")' '"2015"|strptime("%Y")' \
+	 '"Mar"|strptime("%b")' '"2015- 3- 5"|strptime("%Y-%m-%d")' '"2015-03-05T14:30:25Z"|strptime("%Y-%m-%dT%H:%M:%SZ")|mktime' \
+	 '"2015-03-05T14:30:25Z"|strptime("%Y-%m-%dT%H:%M:%SZ")|strftime("%F %T %Z %z")' '1500000000|gmtime|strftime("%Y-%m-%d")|strptime("%Y-%m-%d")|mktime' '"2015-03-05T14:30:25Z"|strptime("%Y-%m-%dT%H:%M:%SZ")|mktime|todate' \
+	 '"abcabc"|indices("b")' '"abcabc"|indices("bc")' '"aaaa"|indices("aa")' \
+	 '"ababab"|indices("abab")' '"abcabc"|indices("z")' '[1,2,1,2]|indices(1)' \
+	 '[1,2,1,2]|indices(2)' '[1,2,3]|indices(9)' '["ab","cd","ab"]|indices("ab")' \
+	 '[{"a":1},{"a":1}]|indices({"a":1})' '[null,null]|indices(null)' 'null|indices("a")' \
+	 '"héllo"|indices("l")' '"日本語"|indices("本")' '[]|indices(1)' \
+	 '"abcabc"|indices("bc")|index("bc")' '"" |split("b")' '"" |split("")' \
+	 '"a"|split("a")' '"abc"|split("d")' '"abc"|split("bc")' '"" |ltrimstr("a")' \
+	 '"abc"|startswith("a")' '"abc"|endswith("c")' '"abc"|test("b")' '"abcabc"|index("b")' \
+	 '"abcabc"|rindex("bc")' '[1,2,1,2]|rindex(1)' '[1,null]|index(null)' \
+	 'null|index("a")' 'null|index(1)' 'null|index(1.5)' \
+	 'null|index({})' 'null|rindex("a")' 'null|rindex(1)' \
+	 'null|indices("a")' 'null|indices(1)' '[1,null]|index(null)' \
+	 '[1,null]|rindex(null)' '[1,null]|indices(null)' '[1]|index(1)' \
+	 '[]|index(1)' '[[1]]|index(1)' '[1,2,3]|add' \
+	 '[]|add' '[1,2]|add' '{"a":1}|add' \
+	 '[1,2,3]|map(.)|add' '[.items[]|length]' '[.tags[]|length]' \
+	 '[.limits]|add' '.txt|indices("l")' '.name|indices("a")' \
 	 '.missing // .name' '.nothing // .port' 'empty // .name' '.tags // .name' \
 	 '.missing // empty' '1 // (2,3)' '1 // error("boom")' '.tags[0] // .name' \
 	 '.missing.a // .name' '[.tags[]|select(.=="nope")] // "d"' '.tags[-1] // .name' \
@@ -1151,9 +1534,13 @@ parity: build
 	  if [ "$$mode" = "r" ]; then flag="-r"; fi; \
 	  while IFS= read -r f; do \
 	    jout=$$(jq $$flag "$$f" $(PARITY_DOC) 2>/dev/null); jrc=$$?; \
-	    if [ $$jrc -ne 0 ]; then invalid=$$((invalid+1)); continue; fi; \
+	    if [ $$jrc -ne 0 ]; then invalid=$$((invalid+1)); \
+	      printf '  jq refuses  %s\n' "$$f" >> $(PARITY_REJECTS); continue; fi; \
 	    oout=$$(./$(BIN) $$flag "$$f" $(PARITY_DOC) 2>/dev/null); orc=$$?; \
 	    if [ $$orc -ge 2 ]; then unsup=$$((unsup+1)); \
+	      if [ "$$mode" = "c" ]; then echo "  REFUSED  $$f"; \
+	        echo "    $$(./$(BIN) $$flag "$$f" $(PARITY_DOC) 2>/dev/null | head -1)"; \
+	      fi; \
 	    elif [ "$$oout" = "$$jout" ]; then exact=$$((exact+1)); \
 	    else differs=$$((differs+1)); echo "  DIFFERS  $$f"; \
 	      echo "    jq    $$jout"; echo "    oojq  $$oout"; fi; \
@@ -1163,7 +1550,10 @@ parity: build
 	echo ""; echo "  oojq parity against jq"; echo "  ---------------------------"; \
 	echo "  byte-identical  $$exact"; \
 	echo "  unsupported     $$unsup"; \
-	echo "  jq rejects case $$invalid  (not a parity requirement)"; \
+	echo "  jq rejects case $$invalid  (not a parity requirement, listed below)"; \
+	if [ -s $(PARITY_REJECTS) ]; then \
+	  echo "  the cases jq ITSELF refuses, printed because a counter nobody can read is a counter nobody can hold to:"; \
+	  sort -u $(PARITY_REJECTS); fi; \
 	echo "  answered differently $$differs  (listed above)"; \
 	if [ $$valid -gt 0 ]; then echo "  parity          $$((exact*100/valid))% of cases jq accepts"; fi; \
 	echo ""
@@ -1227,6 +1617,7 @@ sweep: build
 	@if ! command -v jq >/dev/null 2>&1; then \
 	  echo "SKIP: jq is not installed, so there is nothing to compare against"; exit 0; \
 	fi; \
+	: > $(SWEEP_REJECTS); \
 	printf '%s\n' '{"name":"api","port":8080,"ratio":1.5,"neg":-7,"zero":0,"ok":true,"off":false,"nothing":null,"a":5,"tags":["prod","edge"],"limits":{"rps":500,"burst":750},"items":[{"id":1,"k":"a"},{"id":2,"k":"b"},{"id":3,"k":"a"}],"txt":"Hello World","esc":"a\"b\\c\nd\te","utf":"héllo","nest":[[1,2],[3],[]]}' > $(SWEEP_DOC); \
 	cases=$$(mktemp); jf=$$(mktemp); of=$$(mktemp); \
 	grep -v '^[[:space:]]*#' $(SWEEP_CASES) | grep -v '^[[:space:]]*$$' > $$cases; \
@@ -1236,7 +1627,8 @@ sweep: build
 	  if [ "$$mode" = "r" ]; then flag="-r"; fi; \
 	  while IFS= read -r f; do \
 	    [ -z "$$f" ] && continue; \
-	    jq $$flag "$$f" $(SWEEP_DOC) > "$$jf" 2>/dev/null || { invalid=$$((invalid+1)); continue; }; \
+	    jq $$flag "$$f" $(SWEEP_DOC) > "$$jf" 2>/dev/null || { invalid=$$((invalid+1)); \
+	      printf '  jq refuses  [%s] %s\n' "$$mode" "$$f" >> $(SWEEP_REJECTS); continue; }; \
 	    ./$(BIN) $$flag "$$f" $(SWEEP_DOC) > "$$of" 2>/dev/null; orc=$$?; \
 	    if [ $$orc -ge 2 ]; then unsup=$$((unsup+1)); \
 	    elif cmp -s "$$jf" "$$of"; then exact=$$((exact+1)); \
@@ -1250,10 +1642,40 @@ sweep: build
 	echo ""; echo "  corpus-blind sweep"; echo "  --------------------"; \
 	echo "  byte-identical  $$exact"; \
 	echo "  refused         $$unsup"; \
-	echo "  jq rejects case $$invalid  (not a parity requirement)"; \
+	echo "  jq rejects case $$invalid  (not a parity requirement, listed below)"; \
+	if [ -s $(SWEEP_REJECTS) ]; then \
+	  echo "  the cases jq ITSELF refuses, printed because a counter nobody can read is a counter nobody can hold to:"; \
+	  sort -u $(SWEEP_REJECTS); fi; \
 	echo "  answered differently $$differs  (listed above, full streams)"; \
 	if [ $$valid -gt 0 ]; then echo "  agreement       $$((exact*100/valid))% of cases jq accepts"; fi; \
 	echo ""
+
+install: build
+	@mkdir -p $(HOME)/.openooda/bin
+	cp -a $(BIN) $(HOME)/.openooda/bin/oojq
+	@chmod +x $(HOME)/.openooda/bin/oojq
+	@echo "installed $(HOME)/.openooda/bin/oojq"
+
+VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.1.0)
+
+package-deb: $(BIN)
+	@mkdir -p dist/deb-root/DEBIAN dist/deb-root/usr/bin
+	@sed "s/^Version:.*/Version: $(VERSION)-1/" packaging/debian/control.binary > dist/deb-root/DEBIAN/control
+	@cp $(BIN) dist/deb-root/usr/bin/oojq
+	@chmod 0755 dist/deb-root/usr/bin/oojq
+	@dpkg-deb --build --root-owner-group dist/deb-root dist/oojq_$(VERSION)-1_amd64.deb
+	@rm -rf dist/deb-root
+	@echo "built dist/oojq_$(VERSION)-1_amd64.deb"
+
+package-rpm: $(BIN)
+	@mkdir -p ~/rpmbuild/SOURCES ~/rpmbuild/SPECS ~/rpmbuild/RPMS
+	@cp $(BIN) ~/rpmbuild/SOURCES/oojq-linux-x86_64
+	@sed "s/^Version:.*/Version: $(VERSION)/" packaging/oojq.spec > ~/rpmbuild/SPECS/oojq.spec
+	@rpmbuild -bb ~/rpmbuild/SPECS/oojq.spec
+	@cp ~/rpmbuild/RPMS/x86_64/oojq-$(VERSION)*.rpm dist/
+	@echo "built dist RPM package"
+
+package: package-deb package-rpm
 
 clean:
 	@rm -rf dist .ooda-cache

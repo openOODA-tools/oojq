@@ -1,0 +1,5 @@
+oojq (0.1.0-1) stable; urgency=low
+
+  * Initial sovereign release: 98% jq parity, hardened defenses, universal installers (web, dnf, apt), and green CI/CD.
+
+ -- openOODA-tools <ops@openooda.org>  Mon, 05 Oct 2026 00:00:00 +0000

@@ -1,17 +1,21 @@
 // # Comparison And Ordering Of Values
 //
-// Logline: Decides whether two values are equal and which of them sorts first.
+// Logline: Decides whether two values are equal, which of them sorts first, and whether one contains the other.
 //
 // Setup: Pure, no capability needed. jq's order is fixed: null, then false, then true, then numbers, then strings, then arrays, then objects.
 // Beats:
 //   1. Fold an integer and a decimal into one number before comparing them, so 1 equals 1.0.
 //   2. Compare arrays element by element and objects member by member in key order.
 //   3. Return the sign of the order, not a boolean, so the four operators share one walk.
+//   4. Test containment, which is a subset test and not an equality.
 
 import "filter/eval/num/num_add.oo";
 import "filter/eval/float_op.oo";
 import "filter/eval/eval_leaf.oo";
 import "filter/builtin/anchor.oo";
+import "filter/select_node.oo";
+import "render/render_value.oo";
+import "std/core/primitives/str.oo";
 
 fn rank_of(v: JVal) -> Int {
     if v.kind == "null" { return 0; }
@@ -94,6 +98,79 @@ fn same_members(doc: JDoc, a: JVal, b: JVal) -> Bool {
 
 pub fn values_equal(doc: JDoc, x: Int, y: Int) -> Bool {
     return same_pair(doc, x, y);
+}
+
+// contains is jq's subset test, and its two halves are not the same rule. The
+// kinds must PAIR at the top, or the call is refused by name, because a
+// containment that cannot be checked is not a containment that is false. Below
+// the top a pair that cannot be checked is only false, which is why
+// {"a":1} | contains({"a":"1"}) answers false and does not refuse. Numbers pair
+// with numbers, so 1 contains 1.0, and two arrays are a subset and not an
+// equality: [1,2] contains [1,1], and [[1,2]] contains [[1]].
+// A boolean contains ITSELF and not the other boolean, which is the one place
+// "same kind" is not the rule. Measured on jq 1.8.1: true|contains(true) and
+// false|contains(false) are both true, while true|contains(false) and
+// false|contains(true) are both refused.
+fn contains_pair(a: JVal, b: JVal) -> Bool {
+    if a.kind == "bool" && b.kind == "bool" { return a.bval == b.bval; }
+    if a.kind == b.kind { return true; }
+    return num_kind(a.kind) && num_kind(b.kind);
+}
+
+fn num_kind(k: String) -> Bool { return k == "int" || k == "float"; }
+
+// One place a name is looked up in an object, so a name written twice cannot be
+// found twice here the way to_entries once could.
+fn slot_of(v: JVal, name: String) -> Int {
+    let mut i: Int = 0;
+    while i < list_len(v.keys) {
+        if list_get(v.keys, i) == name { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn any_holds(doc: JDoc, a: JVal, want: Int) -> Bool {
+    let mut j: Int = 0;
+    while j < list_len(a.kids) {
+        if holds(doc, list_get(a.kids, j), want) { return true; }
+        j = j + 1;
+    }
+    return false;
+}
+
+fn holds(doc: JDoc, a_at: Int, b_at: Int) -> Bool {
+    let a: JVal = jval_at(doc, a_at);
+    let b: JVal = jval_at(doc, b_at);
+    if a.kind == "array" && b.kind == "array" {
+        let mut i: Int = 0;
+        while i < list_len(b.kids) {
+            if !any_holds(doc, a, list_get(b.kids, i)) { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+    if a.kind == "object" && b.kind == "object" {
+        let mut i: Int = 0;
+        while i < list_len(b.keys) {
+            let at: Int = slot_of(a, list_get(b.keys, i));
+            if at < 0 { return false; }
+            if !holds(doc, list_get(a.kids, at), list_get(b.kids, i)) { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+    if a.kind == "string" && b.kind == "string" { return str_contains(a.sval, b.sval); }
+    return values_equal(doc, a_at, b_at);
+}
+
+pub fn builtin_contains(doc: JDoc, idx: Int, arg: Int) -> Result[SRes, String] {
+    let a: JVal = jval_at(doc, idx);
+    let b: JVal = jval_at(doc, arg);
+    if !contains_pair(a, b) {
+        return Err(kind_word(a.kind) + " (" + shown_value(doc, idx) + ") and " + kind_word(b.kind) + " (" + shown_value(doc, arg) + ") cannot have their containment checked");
+    }
+    return Ok(bool_result(doc, holds(doc, idx, arg)));
 }
 
 fn compare_same(doc: JDoc, a: JVal, b: JVal) -> Int {

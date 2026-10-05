@@ -1,0 +1,167 @@
+// # Where A Value First Appears
+//
+// Logline: Answers index, rindex, and indices over a string or an array, or refuses a shape whose answer is not nameable.
+// Setup: Pure, no capability needed. The needle arrives as an arena node, because an array is searched by value and a value is not a string.
+// Beats:
+//   1. Read a string for the first place, the last place, or every place the needle sits inside it.
+//   2. Walk an array for the members that EQUAL the needle, first, last, or all of them.
+//   3. Refuse an object rather than guess at what jq does with one.
+
+import "parse/anchor.oo";
+import "filter/select_node.oo";
+import "filter/eval/eval_cmp.oo";
+import "std/core/primitives/str.oo";
+
+// index and rindex are one walk over three shapes, and the shapes do not agree
+// on what a match is. A string holds a substring; an array holds a member equal
+// to the needle, compared by value, so [1] has an index of 1.0 and
+// [{"a":1}] has an index of {"a":1}. An OBJECT is refused, and that is the
+// measured rule rather than a gap: {"a":1} | index("a") is jq's "Cannot index
+// number with number", {"a":{"x":1}} | index("x") is null, and
+// {"a":{"b":1}} | rindex("b") is null. Two answers from one spelling is not a
+// rule to reproduce by guessing, and a refusal is the honest one.
+
+// An array member matches only when NEITHER side is an array, which is why
+// [[1]] | index([1]) is null while [1,2] | contains([1,1]) is true: the subset
+// test descends into a nested array and this search does not.
+fn member_is(doc: JDoc, kid: Int, arg: Int) -> Bool {
+    let e: JVal = jval_at(doc, kid);
+    if e.kind == "array" { return false; }
+    return values_equal(doc, kid, arg);
+}
+
+fn array_index(doc: JDoc, v: JVal, arg: Int, last: Bool) -> Result[SRes, String] {
+    let mut found: Int = 0 - 1;
+    let mut i: Int = 0;
+    while i < list_len(v.kids) {
+        if member_is(doc, list_get(v.kids, i), arg) {
+            if last {
+                found = i;
+            } else {
+                let made: SRes = int_result(doc, i);
+                return Ok(made);
+            }
+        }
+        i = i + 1;
+    }
+    if found < 0 { return Ok(null_result(doc)); }
+    let made: SRes = int_result(doc, found);
+    return Ok(made);
+}
+
+// One pass finds either end. The last match is kept aside while the scan
+// continues, so rindex is the same walk rather than a second one.
+fn find_sub(hay: String, needle: String, last: Bool) -> Int {
+    let total: Int = chars_len(hay);
+    let width: Int = chars_len(needle);
+    if width == 0 || width > total { return 0 - 1; }
+    let mut found: Int = 0 - 1;
+    let mut at: Int = 0;
+    while at + width <= total {
+        let piece: String = str_sub(hay, at, at + width);
+        if piece == needle {
+            if last {
+                found = at;
+            } else {
+                return at;
+            }
+        }
+        at = at + 1;
+    }
+    return found;
+}
+
+pub fn builtin_index(doc: JDoc, idx: Int, text: String, arg: Int) -> Result[SRes, String] {
+    return index_over(doc, idx, text, arg, false, "index");
+}
+
+pub fn builtin_rindex(doc: JDoc, idx: Int, text: String, arg: Int) -> Result[SRes, String] {
+    return index_over(doc, idx, text, arg, true, "rindex");
+}
+
+fn index_over(doc: JDoc, idx: Int, text: String, arg: Int, last: Bool, named: String) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "array" { return array_index(doc, v, arg, last); }
+    if v.kind == "object" {
+        return Err("\"" + named + "\" over an object is not supported: jq reads it as an index into the value, and the two answers it gives are not one rule");
+    }
+    if v.kind == "null" { return Ok(null_result(doc)); }
+    // A scalar is not a searchable shape, so jq reads it as an index into the
+    // value instead: 1 | index(1) is "Cannot index number with number", which is
+    // the refusal the indexing path already knows how to word.
+    if v.kind != "string" {
+        return Err(index_refusal(v.kind, jval_at(doc, arg)));
+    }
+    let at: Int = find_sub(v.sval, text, last);
+    if at < 0 { return Ok(null_result(doc)); }
+    let made: SRes = int_result(doc, at);
+    return Ok(made);
+}
+
+// Every place the needle sits in the haystack, not just the first. Overlaps
+// count, so the scan steps one character at a time and does not jump past a
+// match the way a non-overlapping search would: "aaa" gives [0,1] and "aaaa"
+// gives [0,1,2], which is the measured answer and not an inference from the
+// first two. An empty needle matches nowhere and a needle longer than the text
+// cannot fit, and both give an empty list rather than null, which is what
+// separates indices from index: no match here is an empty answer, not a null one.
+fn all_subs(hay: String, needle: String) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let total: Int = chars_len(hay);
+    let width: Int = chars_len(needle);
+    if width > 0 && width <= total {
+        let mut at: Int = 0;
+        while at + width <= total {
+            if str_sub(hay, at, at + width) == needle { out = list_push(out, at); }
+            at = at + 1;
+        }
+    }
+    return out;
+}
+
+// A list of answers has to become an array of integers in the document, one
+// node at a time, because there is no builtin that builds an array from a list.
+fn ints_result(doc: JDoc, xs: List[Int]) -> SRes {
+    let mut live: JDoc = doc;
+    let mut kids: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(xs) {
+        let made: SRes = int_result(live, list_get(xs, i));
+        live = made.doc;
+        kids = list_push(kids, list_get(made.out, 0));
+        i = i + 1;
+    }
+    let made: SRes = array_result(live, kids);
+    return made;
+}
+
+// The same member_is test index uses, so the two agree about the one shape they
+// both decline to match: a member that is itself an array is never equal to the
+// needle here, which is why [[1,2],[1,2]] | indices([1,2]) is [] in jq and in
+// this. An object member is compared by value and does match.
+fn array_indices(doc: JDoc, v: JVal, arg: Int) -> SRes {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(v.kids) {
+        if member_is(doc, list_get(v.kids, i), arg) { out = list_push(out, i); }
+        i = i + 1;
+    }
+    return ints_result(doc, out);
+}
+
+// indices is index asked for every answer rather than one of them, over the
+// same three shapes and declining an object for the same reason. jq gives an
+// object three different answers from one spelling — {"a":1} is 1, {"a":"s"} is
+// "s", and {"a":{"x":1}} is null — so there is no single rule to copy, which is
+// the refusal index already makes and is not repeated here.
+pub fn builtin_indices(doc: JDoc, idx: Int, text: String, arg: Int) -> Result[SRes, String] {
+    let v: JVal = jval_at(doc, idx);
+    if v.kind == "array" { return Ok(array_indices(doc, v, arg)); }
+    if v.kind == "object" {
+        return Err("\"indices\" over an object is not supported: jq reads it as an index into the value, and the three answers it gives are not one rule");
+    }
+    if v.kind == "null" { return Ok(null_result(doc)); }
+    if v.kind != "string" { return Err(index_refusal(v.kind, jval_at(doc, arg))); }
+    let hits: List[Int] = all_subs(v.sval, text);
+    return Ok(ints_result(doc, hits));
+}

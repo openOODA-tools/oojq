@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+# The release pipeline supplies a prebuilt binary in ../dist: debhelper
+# must not rebuild, retest, or run our install target (all need oodac,
+# which is intentionally absent from the packaging job).
+override_dh_auto_build:
+	@echo "skip: binary prebuilt by release pipeline"
+
+override_dh_auto_test:
+	@echo "skip: tests already ran in the build job"
+
+override_dh_auto_install:
+	install -d debian/oojq/usr/bin
+	install -m 0755 ../dist/oojq-linux-x86_64 debian/oojq/usr/bin/oojq

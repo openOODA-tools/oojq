@@ -97,7 +97,15 @@ pub fn unescape_unicode(src: String) -> List[Int] {
                         }
                     }
                     if code >= 56320 && code <= 57343 { code = 65533; }
-                    buf = push_utf8(buf, code);
+                    if code == 34 {
+                        buf = bytes_push(buf, 92);
+                        buf = bytes_push(buf, 34);
+                    } else if code == 92 {
+                        buf = bytes_push(buf, 92);
+                        buf = bytes_push(buf, 92);
+                    } else {
+                        buf = push_utf8(buf, code);
+                    }
                     i = next;
                 }
             }

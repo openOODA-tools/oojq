@@ -109,6 +109,169 @@ that is meant to prove something. Two habits follow:
 
 Do not trust a green build on a tree you have just restructured. Prove it cold.
 
+### A list here has no pop, so it cannot be a stack, and the failure is a hang
+
+`recurse` needed a depth-first walk, and a walk wants a stack. There are exactly
+four list operations in this language — `list_new`, `list_get`, `list_push`,
+`list_len` — and a stack needs two more: a pop, and a write at an index. Neither
+exists. The first version used a `WList { items, sp }` with a cursor and looked
+right in every small case. Then `oojq -c '[recurse(.[]?)]'` sat at 99.6% CPU
+forever, and the test suite stopped dead at that line.
+
+The reason is worth writing down because the bug is invisible until it is fatal.
+`list_push` appends at the **end** of the list. A pop decrements the cursor but
+does not shorten the list, so the popped entry is still physically at the end. The
+next push therefore lands *past* the live region rather than on it, the cursor
+never reaches the newly pushed entries, and the walk re-reads what it has already
+walked. Two children pushed onto a one-item list really does come out correctly —
+`[0,12,11]` with the cursor at 3 — and only goes wrong *after the first pop*,
+which is the one step a unit test that checks the first result never reaches.
+
+What actually found it was a 60-line probe that reproduced the order `0 12 0 12`
+outside oojq entirely, with a hand-built tree of ints. Three things came out of
+that hour worth keeping:
+
+- **A cursor is a count, so the top is `items[sp-1]` and not `items[sp]`.** The
+  wrong one is in bounds for as long as there is room to push, so it reads stale
+  data instead of failing.
+- **A structure that grows at one end and is consumed from the other cannot be
+  expressed with push-and-read alone.** If the container cannot be shortened or
+  written through, the recursive formulation is not a style preference, it is the
+  only correct one. `recurse_step` is now a plain self-recursive call and the
+  worklist is gone.
+- **Reproduce outside the program.** Every hypothesis tested here — that a String
+  is consumed by being passed in a loop, that the struct field assignment did not
+  stick, that the compiler mis-moves arguments — was wrong, and each cost a
+  build. The 60-line probe answered the question in one build because it had no
+  parser, no arena, and 76 pages in front of it.
+
+### A page at 256 lines gives its lines to a real move before it gives them to prose
+
+`filter/run/eval_run.oo` sat at 255/256 with `recurse` needing about thirty more
+lines, and every function in it is mutually recursive with `eval_filter`, so a
+sibling page holding the walk is a mutual import and is refused. v2.11.8's spec
+still has no function types (`Parameter ::= Identifier ":" [ "&" ] Type`), so
+there is no callback to pass the evaluator in as, and no way out but to move
+non-re-entrant work out of the page. What actually left:
+
+- `eval_bin`'s pairing loop, which never needed `eval_filter`, became
+  `pair_all` in `filter/run/eval_join.oo` beside the operator that does the work.
+- Three `per_member` tails, each four statements over one condition, became one
+  line each. The by-key tail was already correct; it was never a move, and
+  compaction is the only thing that bought it space.
+- `gather`, five lines for one caller, was inlined at that caller.
+
+That is about twenty-five lines of real code. The rest was comment prose, and
+this is the part worth arguing about: trimming a comment to fit a feature looks
+like cheating the Page Rule, and in a page whose comments are the only record of
+*why* something is the way it is, it usually is. The rule that made it honest was
+doing the structural moves first and writing down what each one bought, so the
+prose that went was the redundant half of a sentence rather than the proved
+cause. The facts all survived; the essays did not.
+
+### A cache from the PREVIOUS compiler is worse than a warm one
+
+A toolchain update is the case the rule above does not cover, because nothing in the
+tree changed and every gate still answers. oodac moved from the build that shipped
+`687/687` to v2.11.8, and the first cold build after the fix below produced a binary
+that passed `make build`, passed `oodac check` on every page, and failed **381 of 687
+behaviour tests**. The failures were not one bug. They were three families of the
+same thing — string data wrong at runtime:
+
+- `unknown builtin ""` (~230 cases) — the name reached the parser intact and arrived
+  at the evaluator empty.
+- `expected a name at character N` (~44) — the scanner read a character that was not
+  the one in hand.
+- `unexpected "X" at character N` (~26) — text the parser thought it had consumed
+  was still there.
+
+What made this expensive was that the evidence pointed at the source, not the
+cache. Printing the AST at the parser-to-evaluator handoff showed it **correct** —
+`len=1 root.kind=[func] root.name=[keys]` — while the evaluator read `name=""` from
+that same node. Ten isolated probes then each passed cleanly: the string helpers,
+field assignment, struct construction, a list of structs, `Result` plus `match`,
+`let`-then-pass, direct pass, `POut` threading, a nested struct field. Every
+mechanism oojq relied on worked in isolation.
+
+The distinguishing measurement is not a probe, it is the build: clearing
+`.ooda-cache` **and** `dist/oojq` and rebuilding cold gave `687/687` from the same
+source.
+
+There was a second candidate cause in that episode, and it was worth ruling out
+rather than assuming. The page was changed between the failing build and the good
+one, so "the cache" and "the edit" were both live explanations, and the first one
+was the more likely story, which is exactly when a story needs testing. So the
+direct-pass variant — the one that had produced the 381 failures — was rebuilt
+from a cleared cache on purpose. It answered `keys` with `["a","b"]` and `length`
+with `2` on the first try. Both source forms are correct; only the cache was
+wrong. The `let`-then-pass form was kept anyway, not because the other one is
+broken but because it is the one the full 687 assertions and the parity corpus
+were actually run against, and two probes do not re-earn a whole suite.
+
+So:
+
+- **After any oodac update, clear both `.ooda-cache` and `dist/oojq` before the first
+  build.** A cache keyed on source files is blind to the compiler that wrote it, so
+  it will happily hand back the old compiler's decisions for pages whose source did
+  not change. A stale cache produces a binary that is *wrong*, not *absent*, and a
+  wrong binary is much harder to argue with than a missing one.
+- **When failures are many, in unrelated families, and all about values, suspect the
+  build before the source.** One wrong answer is a bug in the code. Three hundred
+  wrong answers that disagree about *which* value is wrong is a build.
+- `make build` keys only on the `.oo` mtimes, so it will not notice that `oodac`
+  itself is newer. `make build` after an update can also report `Nothing to be done`.
+
+### A name is moved once per FUNCTION, and the check does not ask the path
+
+v2.11.8 enforces a move rule the previous build did not, and the rule is stricter
+than it first reads. `filter/syntax/parse_prim.oo` `named_term` bound
+`let kind: String = w;` and then read `w` again in the next guard, which is now
+`ERR move use after move w`. Three things about the rule are worth writing down
+because each one cost a build:
+
+- **It is not path sensitive.** A name moved inside a branch that has already
+  `return`ed is still moved when the path after that branch is read. Verified with a
+  nine-line page: `if w == "a" { let k: String = w; return 1; } let x: String = w;`
+  is refused. Reordering the guards so the move is last does not help, because the
+  next guard is then the one that reads it.
+- **One move per branch of one `if/else` is still two moves.** The refused count is
+  per function, not per path, so no arrangement of guards avoids it.
+- **Structs are not Strings here.** `Cur` is a struct holding a `String`, and moving
+  one and then using it again checks clean. Only the `String` itself is linear.
+
+The fix that does work is to make the move the *only* move and let each branch name
+a literal instead of moving the shared value. `named_term` now has three literal
+arms that pass `"true"`, `"false"` and `"null"` straight to a `literal_node`
+helper, and the one remaining move is the `call_or_name` argument. That is
+behaviour-preserving by construction: in each arm the word being passed is the word
+that was just compared, so the node built is the node that was built before.
+
+There is a second diagnostic from the same episode, and it is here as a warning
+rather than as an exception. Mid-investigation `oodac check` reported
+`unused import` for three pages whose imports are demonstrably used — deleting
+`filter/eval/num_read.oo` from `filter/eval/float/subnormal.oo` turns `digit_at`
+into `undefined variable`. It was tempting to write that off as a new v2.11.8
+false positive and to relax the `check` target to tolerate it. Both were wrong,
+and the same cold build that fixed the 381 failures fixed this too: with a
+consistent cache all three pages check `OK`, and the strict target passes all 76.
+The imports were never unused and `check` was never wrong.
+
+So, in order:
+
+- **Do not weaken a gate on one unreplicated observation.** The evidence that the
+  three pages were fine was that deleting the import broke them, which rules out
+  "the tree is wrong" and says nothing about whether `check` is wrong. Both can
+  be consistent with a third cause, and there was one.
+- **A diagnostic that appears on some pages and not others, and cannot be
+  reproduced from a cold cache, is not a finding.** Write down what was observed
+  and what would distinguish the causes, and then go get the distinguishing
+  measurement before changing anything.
+
+One more thing the build itself now enforces, so it is worth knowing before you
+spend a build finding out: a page over the ceiling is a **build** failure, not only
+a `make line-cap` failure. Adding five lines of debug to `filter/run/eval_run.oo`
+gave `ERR check oversized filter/run/eval_run.oo 260 > 256` and no artefact at all.
+
 ### A step that reads the whole input stream is the same bug every time
 
 jq applies every step above a field access to **one input value at a time**.
@@ -1769,9 +1932,448 @@ plausible wrong answer, so each was found by a differential run against real
   pointed the next reader at the wrong line. The `nested call` rule in this section
   is real and was violated for real, but not here. If a fix did not change the
   behaviour, say so at the site and move on.
+- **A rewrite cannot recurse, because the node it builds again carries only its
+  own argument.** `walk(f)` was first written as a parse-time rewrite to
+  `if type=="array" then (map(__walk(f)) | f) else … end`, which is correct as
+  text and answered the top level exactly. It failed one level down:
+  `[1,[2,[3]]] | [walk(if type=="number" then .*10 else . end)]` came back
+  `[[10,[2,[3]]]]`. The inner `__walk(f)` is parsed fresh, so its `sval` is `f`
+  and not the `if`/`else` text around it — the hub handed it `f` and applied it
+  once. A filter-argument call applies its argument once *by construction*, so no
+  amount of rewriting makes one recurse. The fix was to move the dispatch into
+  the hub: regenerate **one** level as text and hand it back to the same
+  dispatcher, where the `walk` inside that text is an ordinary call and lands
+  again. `map`, `with_entries` and `|=` then do the structural recursion, which
+  is ten code lines instead of the twenty-five a hub-side rebuild needs.
+- **The page cap is a real design constraint, so measure it before designing
+  around it.** The hub was 255 lines: 204 code, 39 comment, 12 blank. A
+  hub-side `walk` needs to rebuild an array and an object, and because a name may
+  be moved only once per function *and the check is not path-sensitive*, the two
+  shapes cannot share one child list — one function picking between
+  `array_result` and `object_result` moves that list on both paths. So the
+  rebuild is two loops, about twenty-five code lines, and stripped of every
+  comment and blank the page still came to 262. That is what proved the move
+  could not live in the hub. It is also what proved the hub cannot be slimmed to
+  make room: `per_value`, `step_once`, `fold`, `eval_bin`, `eval_if`, `guarded`,
+  `per_member`, `recurse_step` and `run_builtin` each reach `eval_text` or
+  `eval_filter`, so every one of them is mutually recursive with the hub and none
+  can be extracted. The page gave its lines to prose only after that was
+  established, not before.
+- **Walking a container you built is walking your own output.** The first object
+  form was `to_entries | map(walk(f)) | …`, and it dumped core on every object:
+  an entry *is* an object, so `walk` on an entry makes entries of entries and
+  never terminates. The update has to reach the value, not the entry —
+  `map(.value |= walk(f))` — and `|=` already cuts the key when its right-hand
+  side answers nothing, which is exactly the drop `walk` owes. Every crash since
+  has had this shape: something recursing over a structure whose elements it
+  also produces.
+- **`-1` reaching a container is a silent wrong answer, not an error.**
+  `from_entries` read a missing `value` member as `member_child(...) == -1`,
+  pushed that into the object's kids, and answered *nothing at all* for the whole
+  object — no refusal, no value. The same shape then reached `walk` through
+  `with_entries`, which is why a walk that dropped one key of two dropped the
+  entire object. A member that is absent is `null` here, as in jq. When a helper
+  can return "not found", check what its caller does with that value before
+  trusting the refusal path to be reached.
+- **A `paren` node's `sval` is evaluated as filter text, so a rewrite can be a
+  rewrite without the evaluator knowing its name.** `step_once` already answers
+  `n.kind == "paren"` with `eval_text(doc, input, n.sval)`, so a page that is
+  asked to name a builtin can hand back a node carrying text and cost the
+  evaluator zero lines. `map_values(f)` is written that way:
+  `to_entries | map(.value |= (f)) | map(select(has("value"))) | map(.value)` over
+  an array, the same text into `from_entries` over an object. That reached a
+  semantics no amount of new evaluator code would have: the **first** answer of
+  `f` per member, dropped on empty, for both shapes — which is what `|=` does per
+  member and what `map` does not do at all. A dispatch in the hub would have been
+  the obvious design and the hub had no line to spend. Reach for the existing
+  node kinds before inventing a dispatch.
+- **Splice a body into generated text inside parentheses, or it changes the text
+  around it.** `map_values(f)` written as `.value |= f` turns a body of `1,2`
+  into `(.value |= 1), 2`, which is a different filter; both jq and oojq parse
+  that mis-spelling, and then disagree about the error, which looks like a parity
+  bug and is a bug in the test. The same trap cost `walk` its own precedence
+  guarantee. Parenthesise at every splice point, then re-measure: the case that
+  found it was a body of `1,2` and a body of `.a // 7`, two shapes of the same
+  mistake.
+- **A word matcher that looks only forward will match inside a longer word.**
+  `cur_word` checks that the character *after* a match is not an identifier
+  character and never checks the one before, so `word_at(c, i, "if")` is true at
+  the `if` **inside `elif`**. `find_kw` counts nested `if`s that way to find the
+  matching `end`, so every `elif` opened a phantom nested conditional, the real
+  `end` closed that one, and the search ran off the end: every
+  `if/elif/else` in the language was refused with *"if without end"*, and
+  `if/else` and nested `if/else` were the only conditionals that worked. The fix
+  is one guard that skips a whole `elif` before the `if` test can see its tail.
+  Read the matcher's boundary rule, not just its call site: the bug was in
+  `cur_word` and every caller inherited it.
+- **Lowering `elif` to a nested `if` has to close the `if` it writes.** The
+  parser already lowered `elif C then D` to the text `if C then D` and left the
+  `end` for the outer conditional to consume — which is an unterminated filter
+  that cannot parse. Writing `"if " + rest + " end"` is the whole correction, and
+  it is invisible until the scanner bug above is fixed, because the phantom
+  nesting was refusing the construct long before the lowered text was ever run.
+  **Two defects, one symptom:** fixing the first without the second moves the
+  failure rather than removing it, so expect a second build.
+- **An error message that does not print the thing it names is a defect, and
+  the way to find out is to print more.** `if without end, after a branch of `
+  arrived with nothing after it, which said the branch text was empty — but the
+  source concatenated a variable after the literal, so either the scanner had
+  eaten the tail or the variable really was empty. Guessing between those from
+  the message alone cost several wrong theories; a message carrying the two
+  positions settles it in one build. **A diagnostic that cannot distinguish its
+  own causes is not a diagnostic.** The suspicion that drove the longest wrong
+  theory — that `\"` at the end of a literal is dropped — was false, and one
+  probe against real jq killed it in a second.
+- **Reading only the last of a generator's answers is a wrong answer, and it
+  hides in the path that every literal argument shares.** The hub took
+  `list_get(r.out, list_len(r.out) - 1)` for a literal argument, so
+  `[1,2] | index(1,2)` answered `1` where jq answers `0` then `1`; the same
+  truncation made `contains(1,2)` refuse about the *second* needle instead of
+  the first, and `error(1,2)` raise the second message instead of the first. The
+  cases are rare, which is exactly why they survived: the corpus held one
+  `contains` case and no generator argument at all. Two things fixed it, and
+  both were needed. The four calls that want one value now **refuse** a
+  generator — a refusal beats an answer that is silently half the question —
+  and the list is named rather than applied to the whole path, because
+  `setpath` is handed a generator on purpose and answers once per value. Note
+  the direction of the fix: support later if it is wanted, refuse now because
+  the alternative is a number that is wrong.
+- **A builtin is not one shape.** `index` was a `String` needle over a
+  `String` haystack, so every array and object was refused, and `contains` took
+  the same shape and *fell through to `false`* for the rest. Both were
+  one-parameter functions dispatched over a domain of three, which is the shape
+  that hides a fall-through. When a name is dispatched, ask what shapes reach
+  it and whether the ones that do not are refused or answered.
+- **Sweep the corpus in the direction that finds wrong answers.** The obvious
+  audit is "where do we refuse and jq answers?", and it found the holes. The
+  other direction — "where do we answer and jq refuses?" — found the three
+  `contains` wrong answers, and the sweep's own refused list is what surfaced
+  `index` on an array. Both directions pay; only one of them is fun.
+- **Measure the shapes a builtin does NOT claim before claiming them.** jq's
+  `index` over an object is not a rule: `{"a":1} | index("a")` is *"Cannot
+  index number with number"* while `{"a":{"x":1}} | index("x")` is `null` and
+  `{"a":{"b":1}} | rindex("b")` is `null`. Two answers from one spelling is not
+  reproducible by guessing, so the object is refused by name and the string and
+  array forms are answered exactly. **Refusing a result you cannot name is the
+  honest answer, and it is a better one than a plausible guess.**
+- **A refusal that answers `false` is a wrong answer, and it hides behind a
+  refusal-shaped signature.** `contains` took a `String` needle, so
+  `contains(["x"])` was refused — and every kind it did not recognise fell off
+  the end of the function to `return false`. So `{"a":1} | contains("a")`
+  answered `false` where jq refuses, `["a"] | contains("a")` answered `true`
+  where jq refuses, and `1 | contains(1)` answered `false` where jq says `true`.
+  Three wrong answers and one hole, all from one function whose *declared* type
+  made the hole look intentional. **Sweep for the fall-through, not just the
+  refusal:** a function whose signature is narrower than the domain it is
+  dispatched over will answer for the part it cannot see. It is now a recursive
+  subset test on the comparison page, 48 of 48 probed cases byte-identical.
+- **jq's containment is a subset test with a kind check at the top and none
+  below it, and both halves have to be measured.** At the top the kinds must
+  pair or the call is refused (*"array and string cannot have their containment
+  checked"*), and numbers pair with numbers so `1` contains `1.0`. Below the
+  top a pair that cannot be checked is only `false`, which is why
+  `{"a":1} | contains({"a":"1"})` answers false and does not refuse. Two arrays
+  are a subset and not an equality, so `[1,2]` contains `[1,1]`, and the test
+  recurses, so `[[1,2]]` contains `[[1]]`. A rule read off one case is not the
+  rule: "arrays are a subset" would have been wrong about `[1,1]`.
+- **A wrong answer outranks a missing feature, so audit for answers where jq
+  refuses.** Listing the corpus cases that oojq refuses surfaced 48, and most
+  were cases jq refuses too — the interesting set is the other direction. Two of
+  the 21 real refusals were `contains` cases hiding three wrong answers beside
+  them. When the corpus is scanned for holes, scan it for **over-answering** as
+  well, because that is the failure that looks like a pass.
+ `if without end, after a branch of `
+  arrived with nothing after it, which said the branch text was empty — but the
+  source concatenated a variable after the literal, so either the scanner had
+  eaten the tail or the variable really was empty. Guessing between those from
+  the message alone cost several wrong theories; a message carrying the two
+  positions settles it in one build. **A diagnostic that cannot distinguish its
+  own causes is not a diagnostic.** The suspicion that drove the longest wrong
+  theory — that `\"` at the end of a literal is dropped — was false, and one
+  probe against real jq killed it in a second.
 
+### A test that pins a divergence is worse than no test
+
+Four assertions in the suite were **asserting the wrong answers they were
+supposed to catch**:
+
+```
+assert_out "... 'has(1)' ..." 'false' "has on an object ignores a numeric key"
+assert_code "... '.t|join("-")' ..." 2 "join refuses non strings"
+```
+
+Both were true when written, because both described the implementation rather
+than jq. `{"a":1} | has(1)` was `false` here and a **refusal** in jq, and
+`[1] | join("-")` was a refusal here and `"1"` in jq. When `has` and `join` were
+corrected to match jq, these four assertions failed — and the failure read as
+"the fix broke the tests" rather than "the tests were wrong all along".
+
+The trap is that a green suite is indistinguishable from a suite that pins the
+current behaviour, so the assertions that encode a bug are exactly the ones
+nothing flags. Two rules follow, and both are cheap:
+
+- **An assertion is written from jq's output, never from this build's.** Generate
+  it. The generator in `/tmp` (`genhasjoin.py` and its siblings) reads jq and
+  asserts the kind at the same time, so a case where jq answers and this build
+  refuses cannot slip through as an expected value.
+- **When a bug is fixed, expect the tests to fail, and read each failure as a
+  claim about jq.** Four failures after a correctness fix is four places the
+  suite was describing the bug. A fix that leaves the suite untouched has not
+  been checked against the thing that was wrong.
+
+### A make recipe is one command, and a command has a 128 KiB limit
+
+`make test` stopped working with `Argument list too long` and **exit 127**, with
+no failure anywhere in the suite. The recipe had grown to 130 705 bytes, and
+`$(DOC)` is inlined twelve times, so the string handed to `execve` was about
+131 700 — just past Linux's `MAX_ARG_STRLEN` of 131 072. Nothing about the tests
+was wrong; the *container* was full.
+
+A recipe is not a script. Backslash-newline joins the physical lines into **one
+command**, and that whole string is a single argument to `/bin/sh -c`. So a
+suite that keeps growing eventually cannot be run at all, and it fails at the
+boundary rather than gradually. The fix is structural, not cosmetic: the helpers
+moved into one `define SUITE_FNS` and the assertions are split across several
+recipe lines, each its own shell, each counting into a file the final `awk`
+sums. The suite reports **every** failure across all chunks, not just the first
+chunk that had one.
+
+Two make behaviours cost a build each here, and both are worth remembering:
+
+- **A `@` is only special at the start of a logical line.** Join two commands
+  with `; \` and the second `@` is handed to the shell as the command `@`:
+  `line 2: @: command not found`. Every `@` in this Makefile's recipes sits at
+  the head of its own logical line for that reason.
+- **A `define` used in a recipe cannot contain newlines.** The expansion is
+  inserted after make has already joined the recipe, and dash then sees a
+  function body whose lines no longer end where the parser expects:
+  `syntax error: unexpected end of file from '{' command on line 1`. It
+  reproduces in a thirteen-line Makefile. `SUITE_FNS` is therefore a **single
+  line**, every function body written with `;` instead of a line break.
+
+Diagnosing this needed the exact string, and `make -n` prints the expansion
+across lines — slicing that back into a file and running `sh -n` on it located
+the fault in one step, where three theories had already failed.
+
+### A gate that has not been run since a change is not a gate
+
+`suggest-audit` compares the names the evaluator dispatches against the names
+the suggester can propose, in both directions, and it **failed** on `recurse`
+and `walk`. Neither was this increment's doing: `eval_run.oo` dispatches both
+directly, because each walks a filter itself, and neither was ever added to the
+list in `eval_suggest.oo`. The last fully green run predated the change that
+dispatched them, and nothing had run the gate since.
+
+The lesson is not about these two names. It is that a gate is evidence only
+where it was last run, and a green board is a statement about the past. Add the
+entry, and note what the gate bought: the user typing `wal` now gets
+`unknown builtin "wal"; did you mean "walk"?` instead of nothing, which is the
+entire reason the list has to track dispatch.
+
+### A comma is one argument and a semicolon is two
+
+`add(f)` is `[f] | add` in jq, and it is now a parse-time rewrite here. The
+rewrite is trivial; the part that was nearly a wrong answer is what counts as an
+argument.
+
+```
+[1,2]   | add(.[0], .[1])   ->  3      one argument, a generator, so the collect
+                                        holds 1 and 2 and sums them
+[1,2,3] | add(.;.)           ->  add/2 is not defined at <top-level>
+```
+
+Both bodies are a `;` and a `,` apart, and they mean different things. A
+**top-level comma** is part of one argument: the filter runs once and answers
+twice, and the collect gathers both answers. A **top-level semicolon** is the
+**argument separator**, so `add(.;.)` is a call with two arguments and jq has no
+`add/2` to answer it with.
+
+Written as `[` + body + `] | add`, the second one would have collected `[.;.]`
+into an array, summed it, and answered a number — for an input jq refuses to
+parse. That is a wrong answer wearing a refusal's clothes, and it would have
+passed every test written against the cases that *are* legal.
+
+The module already had the reader for it: `semi_at_top` in `rewrite.oo`, added
+for `recurse(f; cond)`. The lesson is that **a rewrite has to read the shape of
+the body, not just splice it.** A body spliced into a bracket is delimited by
+the bracket, which is why a comma and a `|` are both safe there and a `;` is
+not — the one thing the bracket does not stop is the argument separator, because
+by then the call has already been decided.
+
+The general form: for a builtin of arity one, **enumerate the separators before
+implementing the happy path.** The happy path is the case you test; the separator
+is the case that turns a refusal into a number.
+
+
+### An answer to a call the reader did not make is still a wrong answer
+
+The kind matrix runs every dispatched builtin against every input kind against
+every scalar argument — 4 620 cases — and classifies each one as agreeing, both
+refusing, or **one side answering and the other not**. That third class is the
+only one that can hold a defect, and it held 714.
+
+Almost all 714 were one bug. oojq read a body written after a builtin and threw
+it away:
+
+```
+1     | tonumber("b")      ->  1        jq: tonumber/1 is not defined
+"abc" | length(1)          ->  3        jq: length/1 is not defined
+"abc" | type(1)            ->  "string"
+1.5   | ascii_upcase("b")  ->  1.5
+```
+
+The value produced is **the correct answer to the call the reader did not
+make**. That is the worst shape a wrong answer can take. It is silent, it is
+plausible, and nothing about it reads as a gap — a test written against
+`length(1)` would have recorded `3` as correct and passed forever.
+
+Two things had to be right to fix it, and the second is the one worth keeping.
+
+**The list was measured.** Asking jq which of the 94 names it knows about — no,
+the 94 names *this build* knows about — and checking each at arity 1 and arity
+2. A name refused at **both** takes no body. A name refused only at arity 1
+takes two: `sub("a")` is `sub/1` and does not exist, `sub("a";"b")` is `sub/2`
+and does. That second query is the whole trick. Without it `sub` and `gsub` land
+in the list, and a deny-list that refuses a call which works is worse than the
+bug, because it is now *invisible* — it looks like a feature that was always
+missing.
+
+**It is a deny-list, not an allow-list.** The tempting version is to list the
+names that take a filter and refuse everything else, which is shorter and reads
+better. It is also a trap: the list has to be right, and a name missing from it
+stops working the moment this page is written. A deny-list is wrong only in the
+safe direction, because a name left out of it behaves exactly as it did
+yesterday. **Prefer a list whose omissions are inert.** For the same reason the
+check is gated in both directions — 47 of 47 listed names refuse, *and* 47 of 47
+others still take their bodies. A check that only inspects the names it fixes
+cannot see the names it broke, which is the failure mode every "I tested my
+fix" claim has.
+
+The rule generalises past arity: **an answer to a question the filter did not ask
+is a wrong answer, however plausible the value is.** Silent divergence is worse
+than a loud one, because a loud one is found.
+
+
+### A construct refused in one position and not the other
+
+`1 as $x | $x` answered `unexpected "a" at character 3`. The same word at the
+start of a filter was refused properly — `binding a variable with "as" is not
+supported in this build` — so the construct was readable in one of the two
+places a reader would write it, and the message at the other named neither the
+construct nor the reason.
+
+It was not only `as`. Every reserved word behaved this way, because all of them
+are recognised in one place only:
+
+| filter | before | after |
+|---|---|---|
+| `1 as $x \| $x` | `unexpected "a" at character 3` | `binding a variable with "as" is not supported…` |
+| `1 reduce . as $x (0;.)` | `unexpected "r" at character 3` | `"reduce" is not supported…` |
+| `1 def f: 1; f` | `unexpected "d" at character 3` | `"def" is not supported…` |
+| `1 label $out \| 1` | `unexpected "l" at character 3` | `"label" is not supported…` |
+
+Nineteen lines in `filter/syntax/parse_top.oo`: when leftover text begins with an
+identifier that is a reserved word, that word's own sentence is returned.
+`reserved_word` became public so the two positions share one list rather than
+two drifting copies.
+
+The part that matters more is what it must **not** do. A leftover that is not a
+reserved word still gets the generic `unexpected` message, so `1 2`, `1 @` and
+`.a b` still say `unexpected "2" at character 3`. A fix that swallowed every
+leftover would look tidier and would hide a real syntax error behind a sentence
+about a feature, so the harness checks the generic path as well as the new one,
+along with six ordinary filters that must still parse.
+
+### A counter nobody can read is a counter nobody can hold to
+
+`make parity` reported `jq rejects case 135 (not a parity requirement)` and moved
+on. That number had gone to 213 by the time anybody looked, and **78 of those
+cases were not jq being careful — they were my own typos**.
+
+A parity case jq cannot compile contributes nothing: it is neither agreement nor
+divergence, so it can never fail and never teaches anything. Ten new cases
+looked fine in the source and were silently inert. Eight of them were not valid
+jq at all, because only `as` binds an expression on its left — `1 reduce …`,
+`1 def …` and `1 label …` are syntax errors, so the corpus was scoring nothing
+for them.
+
+Both loops now print the cases jq refuses, sorted, the way the refusal list is
+printed:
+
+```
+  jq rejects case 177  (not a parity requirement, listed below)
+  the cases jq ITSELF refuses, printed because a counter nobody can read is a
+  counter nobody can hold to:
+  jq refuses  0.1%0.05
+  jq refuses  1%0.3
+  jq refuses  [[1,2]]|@csv
+```
+
+That is the same lesson as printing refusals rather than counting them, applied
+to the bucket that was hiding the typos. It is the bucket a malformed case lands
+in, which makes it the one bucket that must be readable.
+
+The eight invalid cases came out of the corpus — their refusal messages are
+pinned by `make test` assertions, which is the right place for them, since parity
+cannot score a filter jq will not parse. What stayed is the three that are real
+jq: `1 as $x | $x`, `as $x` and `.a as $x | .`, and those now show up honestly as
+**unsupported** rather than as nothing at all.
+
+A related trap, in the same edit: `$$` is how a `$` reaches the shell from a
+recipe, so `1 as $x | $x` in a Makefile arrives as `1 as  |` — a mangled filter
+that jq also rejects, and so was equally invisible. `make -n parity | grep` is
+how that one was found, and it is the cheapest way to see what a corpus entry
+actually became.
 ## 7. Verification Gate
 
+
+### The rewrite that was exact for every case anyone would test
+
+`//=` looks like `|=` with a different operator, and the natural move — the same
+bargain `add(f)`, `recurse(f; cond)` and `map_values` already take — is to
+rewrite `LHS //= RHS` into `LHS |= (. // RHS)`. It is free, it is in the spirit
+of the codebase, and it is **wrong**.
+
+Ten shapes measured against jq 1.8.1 agree. Two do not, and both are the same
+fact: jq reads the right-hand side **eagerly**, before it looks at the left.
+
+| filter | jq | the `\|=` rewrite |
+|---|---|---|
+| `.a //= (empty)` | **nothing** | `{"a":1}` |
+| `.a //= error("x")` | **error: x** | `{"a":1}` |
+| `.a //= (1\|debug)` | `["DEBUG:",1]` | `{"a":1}` |
+
+The empty case is not a bug in the rewrite, it is inexpressible: `//=` with an
+empty right-hand side produces **no output**, and `|=` assigns a *value*, so no
+filter of this shape can say "this assignment happened to nothing". That needs a
+binding — `RHS as $r | . // $r` — and this build has no variables. So the
+rewrite is not "mostly right with an edge case"; it is right exactly when the
+right-hand side is **pure**, and every impure case is a silent wrong answer.
+
+**The ten agreeing shapes are the trap.** A test suite written from the obvious
+examples passes completely, and the defect it would ship is a *missing output*
+and a *swallowed error* — the two hardest classes to notice, because the happy
+path is untouched. This is the cost of a rewrite being free: it can be adopted
+for the cases you measured and fail on the ones you did not think to.
+
+So the rewrite was not taken, and what shipped instead is the **decision**:
+the refusal now names both divergences and states outright that the `|=`
+spelling is "silently wrong for an impure right hand side", and seven assertions
+generated from live jq pin the boundary. Three of them pin the part most likely
+to be misread — that `.d |= (. // 9)` leaves `d` at `0` and `.e |= (. // 9)`
+leaves `e` at `""`, because **both are truthy in jq**, and "falsy" there means
+`null` and `false` and nothing else.
+
+The general form, and it is the one worth keeping: **before rewriting a
+construct into a supported one, look for the case where the original produces no
+output or produces an error.** Those are the two answers a rewrite of a
+*value-producing* construct cannot reproduce, and they are exactly the two the
+happy-path examples never mention. A rewrite that cannot fail loudly is not a
+refactor; it is a bug with good test coverage.
+
+A refusal that is measured and asserted is a decision. A refusal that is only a
+string is an excuse, and the next reader cannot tell which one they are looking
+at.
 ```
 make verify
 ```
@@ -1852,3 +2454,232 @@ removed from *jq's* output as well as oojq's. The comparison stays symmetric and
 therefore still meaningful, but such a case is not testing the byte. Comparing
 through a file per case would fix it and is not done here; the caveat is the
 reason it is written down.
+
+**A work queue is read in the order it was filled, so pushing the two halves of
+a substitution in the wrong order reorders the *answer*.** `strftime` replaces a
+composite like `%F` with its own spelling and carries on. I pushed the rest of
+the format first and the composite second, on the reasoning that the composite
+"should be done first", and the queue is FIFO, so `%F %T` came back as a space,
+then the clock, then the date. Twenty-three of a hundred and forty-six cases were
+wrong and every one of them was this. The two lines were in the wrong order.
+**A test that asks for the same thing twice cannot detect an ordering bug**:
+`%c%c` passed throughout, because two identical expansions in the wrong order
+are indistinguishable from two identical expansions in the right one. When a
+substitution is involved, the test has to put something *different* on each side
+of it.
+
+**A value that is right on one machine and wrong on the next is not an answer.**
+jq's `%s` is `mktime` of a wall clock, not the epoch of the instant being
+formatted, so it reads in the machine's own timezone: measured at `1425601825`
+here, `1425565825` under `TZ=UTC`, and `1425533425` under `TZ=Asia/Tokyo`, all
+for one input. oojq has no timezone database, so the UTC epoch would be correct
+on exactly one of those machines. It refuses the code and names the missing
+state. The general form: when jq's answer depends on something oojq cannot read
+— a timezone, a locale, a clock — refusing and saying which thing is missing is
+the honest answer, and it is per *code* rather than per builtin, so the other
+twenty-four codes are still implemented. `%Z` and `%z` stayed, because jq writes
+those as `GMT` and `+0000` under every timezone measured.
+
+**A hand-written file list in a build rule is a cache of the tree, and it goes
+stale.** The Makefile's `SRC` listed the pages `$(BIN)` depends on, and it was
+missing ten of them: all of `filter/eval/float/` and `find_index.oo`. The
+consequence was not a wrong answer, it was a *missing rebuild* — edit a float
+page, run `make build`, and it reported nothing to be done. It is now
+`$(shell find ...)` over the tree. The general form: a list that has to be kept
+in step with a directory is a list that will not be; derive it and let a gate
+check the derivation.
+
+**Count a gate's units before writing them down.** After `strftime` I wrote
+into this file's README that "the 27 refusals are 13 cases", from arithmetic on
+the old sentence. The loop runs every case in three output modes and books a
+refusal once per mode, and it `continue`s past any case jq itself rejects, so
+four of the six new refusal cases were never even compared. The honest figure
+was 9 cases, of which 2 were new. **Read the counting loop; do not infer the
+unit from the previous number.**
+
+**`strptime` answers with uninitialized C memory whenever the format carries no
+date, and the two garbage values are `8` and `367`.** Measured across every
+directive with a matching input: `"14:30:25" | strptime("%H:%M:%S")` is
+`[1900,0,0,14,30,25,8,367]`. Slot 6 is a weekday, which cannot be 8, and slot 7
+is a day of the year, which cannot be 367 for any year that has one. The
+pattern is stable across repeated runs and across a changed working set, which
+is exactly what makes it dangerous: it is reproducible *on this machine* and
+means nothing anywhere else. It is a C struct `tm` that nobody initialized.
+
+Where a date *is* present, the other six slots are computed and the whole
+answer is nameable, and the rule behind them is one line: with
+`days = civil_days(year, month + 1, day)`, the yearday is
+`days - civil_days(year, 1, 1)` and the weekday is `day_weekday(days)`. That
+un-normalized day count is why `strptime("%Y")` on `"2015"` gives yearday `-1`
+— a day of 0 in January is the day *before* 1 January, so it lands one day
+before the year it is yearday-of — and why the same formula gives `63` for
+`"%Y-%m-%d"` on `"2015-03-05"` with nothing special done for it. A weekday or
+yearday written by `%a`, `%A`, `%u`, `%w`, or `%j` overrides the computed pair,
+and the date those override is *not* moved.
+
+So the decision for `strptime` is the same shape as the one for `sqrt`: answer
+every shape whose answer can be named, and refuse the one that cannot, **per
+format rather than per builtin** — `"2015-03-05" | strptime("%Y-%m-%d")` is the
+canonical use and every slot in it is computed, so refusing the whole builtin
+would refuse a result that can be named exactly. The refusal has to name the
+missing thing, the way `strftime`'s `%s` names the missing UTC offset. The
+same reasoning that rejected jq's `mktime` refusal at 1969-12-31 rejects
+copying 8 and 367: a boundary artifact of one C library is not a rule jq chose,
+and writing it into a program that has no C library is writing a guess with a
+number in it.
+
+**Shipped on that basis, and two more things came out of measuring it.** First,
+**jq's `strptime` does not require the format to consume the whole input** — the
+unread remainder is appended to the answer as a **ninth element**, which is a
+`String` where the ninth element of `gmtime` is an **integer** UTC offset.
+`"2015 extra" | strptime("%Y")` is `[2015,0,0,0,0,0,3,-1," extra"]`. This is the
+same defect wearing a different hat: a slot with no defined value in the result
+is being filled with whatever was lying around, and the refusal is the same one,
+now naming the text that was left over. Second, **jq's reading table and its
+writing table disagree in one place**: `%x` is `%m/%d/%Y` when reading and
+`%m/%d/%y` when writing, so `"03/05/15"` is 2015 under `%D` and 15 under `%x`.
+A rule read off one direction of a format is not automatically true of the
+other; each had to be measured, and the two tables are now spelled once each in
+their own page so neither can drift.
+
+Two more measured facts about the parse side, both needed and neither obvious:
+the composites are **not** supported for parsing even though `strftime` has all
+eight (`%F`, `%T`, `%D`, `%R`, `%r`, `%x`, `%X`, and `%c` all refuse), and `%G`,
+`%V`, `%U`, `%W`, `%Z`, and `%z` parse and then set **nothing at all** — `%G` on
+`"2015"` still answers the year 1900. Digit widths are tight and asymmetric:
+`%Y` takes at most 4, `%C` and `%y` at most 2, `%j` at most 3, `%u` and `%w`
+exactly 1, and every one of them must consume the rest of the text. `%m`,
+`%d`, and `%I` refuse 0 — the parse side is one-based where the array is
+zero-based — while `%S` accepts 61 and `%j` accepts 366, so the range checks
+are not one rule either. Measure the shape; do not assume the family.
+
+**`strptime` hit an `emit-llvm` failure that `oodac check` called OK, and the
+cause was a struct return.** The symptom was `unknown field <name>` for a field
+that demonstrably existed — `out` belongs to `SRes` and is read in dozens of
+places, `sf_ok` and `g_sec` and `hit` were fields of structs declared a few lines
+above — and the name **moved** whenever the source was renamed, which is what
+says it is positional corruption rather than a real lookup failure.
+
+**The lesson is the one to keep: a struct declared in one page and returned from
+it is the shape that trips it, and the shape that fixes it is to return a plain
+`Int`, a `String`, or a `List`.** Rewriting the whole format walk as one
+function holding plain `Int` locals and handing eight of them to a finish
+function made an 83-page tree build cold, from an empty cache, first try. The
+working `strftime.oo` had been the evidence all along: it does the identical
+walk over a format and returns **Strings** at every step, never a struct.
+
+What was believed along the way, and was wrong, is worth recording because it
+cost the most time:
+
+- **The checker and the compiler disagreed, and the checker was right.** Six
+  hand-built probes of every shape I could think of all built — a struct
+  returned and read by field, nested structs, a struct field of an imported
+  type, mutate-a-copy-and-return, `Result[<struct>, String]`. So the shape was
+  not the trigger, and renaming proved only that the message is positional.
+  **When the checker says the code is right and the compiler says a name does
+  not exist, believe the checker, stop renaming, and bisect the module** — build
+  the page on its own with a caller, which turns a four minute build into thirty
+  seconds. Two separate reverts to a green tree were the price of not doing that
+  sooner.
+- **A measurement made through a shell loop can be a measurement of the loop.**
+  The first reading of jq said all eight composite codes refuse to parse. The
+  probe built its format string with a doubled percent, so jq was asked about
+  `%%F`, every case failed, and a bug in the harness looked like a clean finding
+  about jq. **Never believe a negative result from a loop you have not read.**
+  Re-measured one escape level down, seven of the eight parse.
+
+**A reader that returns two answers must return them separately.** The first
+working version used one `Int` to carry both "March is month 2" and "the match
+ended at index 5". That is correct for every input where the two coincide — `Mar`
+— and wrong for every input where they do not: `March` matched `Mar` and left
+`ch` behind, and the same conflation cost `%p`, `%Z`, `%z`, and every composite
+built on a name. Four wrong answers, none of which testing `Mar` alone would
+have found. They now travel as a two-element `List[Int]`, value then position,
+with an empty list as the one failure shape. **Test the shape where the two
+answers differ, not the shape where they agree.**
+
+**A sentinel must not share a range with a value it is standing in for.** `%j`
+stored "day of the year minus one", so a legitimate `000` became `-1` and read
+as "not set"; the parse side counts from one and `dr_lo` now says so. Worse, the
+overflow path carried the walked-to day count in a variable tested with `>= 0`,
+which is false for every date before 1970 — so the weekday was right for 2015 and
+silently wrong for 1900, and only a pre-epoch case found it. A day count is
+negative before 1970; a `Bool` flag is not.
+
+**A working tree beats a half-shipped feature.** That was called correctly twice
+while this was blocked. The feature is now in: `strptime` plus `parse_names.oo`,
+`parse_cal.oo`, and `parse_codes.oo`, **0 wrong answers across 401 measured
+cases**, with all 104 remaining divergences being refusals.
+
+**There is no stderr in this runtime, and the compiler will not add one from
+here.** oojq writes every error to stdout; jq writes every error to stderr. The
+divergence is observable — `oojq -c '2|sqrt' > out` puts the refusal *inside*
+`out`, and `2>/dev/null` does not silence it. The cause is not a choice in
+`main.oo`:
+
+- `print` lowers to `@oo_print_str`, which writes to stdout and adds no newline.
+- `eprintln` is **known to the checker** (`check/tc_names_known.oo`) and
+  **classified as a side effect** (`emit/llvm/ll_fn.oo`), and those are the only
+  two places it appears. There is **no `@oo_eprintln` declaration** in
+  `ll_need_tab.oo`, no emit branch, and no runtime symbol anywhere in the
+  toolchain. Calling it would not write to stderr; it would not write at all.
+- No workaround exists inside the language: there is no file-descriptor access,
+  and `write_file` and `sys_exec` are the wrong tool for an error message.
+
+So the decision is the same one `strftime`'s `%s` took, for the same reason: a
+capability that does not exist is refused and written down, not approximated.
+The compiler is a parent project, and sibling projects are out of bounds. What
+makes this durable rather than a note in a README that quietly rots is that
+**three assertions pin it** — the exact refusal text on stdout, stderr empty,
+and the version banner on stdout — so the first build that gains a stderr
+writer fails the suite instead of passing it unnoticed.
+
+**A gate that counts without printing is a gate nobody can hold to.** `make
+parity` printed every disagreement on its own line and printed only a *total*
+for refusals, so the claim "the 27 refusals are 9 cases, and every one is a
+boundary written down here" was true but unfalsifiable from the output. The
+loop now prints each refused case with the reason oojq gave, once, in the first
+output mode. Reconstructing the list by hand confirmed the 9 exactly: **6
+`sqrt`**, **1 `test`** carrying a character class, and **2 `strftime`** (`%s`,
+and a format written as a generator). **When a number is the only record of a
+list, the list is a memory and the number is a claim. Print the list.**
+
+**Nine string builtins never checked the kind of their operand, and every one of
+them answered instead of refusing.** `index`, `rindex`, `indices`, `split`,
+`startswith`, `endswith`, `ltrimstr`, `rtrimstr`, and `test` each read a string
+out of the argument, and each had a path where a wrong kind was coerced:
+`"abc" | index(1)` answered `null`, `null | startswith("a")` answered `false`,
+`1 | split("b")` answered `[""]`, `[1] | test("a")` answered `false`. None of
+those is a missing feature; each is a confident wrong answer, which is the one
+class the project ranks above everything else.
+
+Two things made them easy to miss and are worth writing down:
+
+- **The input side and the argument side are different tests, and only one was
+  written.** Every one of these builtins checked that its *input* was a string
+  and never checked its *argument*, or the reverse. `"abc" | index(1)` and
+  `1 | split("b")` are the same defect from two directions. **For any function
+  with two operands, enumerate the pairs, not the values.**
+- **A probe's own syntax can change which function is under test.** The first
+  sweep of the family wrote `1|"abc"|startswith("b")` intending "a string
+  needle against a number". The pipe makes the input to `startswith` be `"abc"`,
+  so it was testing a string against a string and answering `false` correctly.
+  Three of the "findings" were that mistake. It also produced two *real* finds
+  by accident, because a wrong probe still exercises something. **Read the probe
+  as a filter, not as a description of one** — and when a result contradicts the
+  expectation, suspect the probe before the code.
+
+The fix is one guard in `filter/eval/eval_builtin.oo` at the single point where
+both operands are in hand, because the shape is identical and only the wording
+differs: `ltrimstr` borrows `startswith`'s sentence and `rtrimstr` borrows
+`endswith`'s because jq builds one from the other. It runs **before** the generic
+"needs a scalar literal argument" check, so `"abc" | startswith(null)` says
+`startswith() requires string inputs` rather than the vaguer sentence. Both
+refuse either way, so this is about which refusal a user reads, not about
+whether.
+
+**`""|split("b")` is `[]` and not `[""]`.** The trailing-piece step is what
+makes `"a" | split("a")` give `["",""]`, and on an empty haystack it produced
+one empty piece where jq produces none. Found by accident, by the same malformed
+probe: the filter `1|""|split("b")` reads as "split the empty string", which is
+not what the author meant to write, and the answer it gave was wrong anyway.

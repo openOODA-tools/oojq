@@ -71,7 +71,7 @@ pub fn parse_update(c: Cur, ast: AList) -> Result[POut, String] {
 fn one_update(acc: POut) -> Result[POut, String] {
     let p: Cur = cur_skip(acc.cur);
     if cur_has(p, "//=") {
-        return Err("the //= operator is not supported: jq reads its right hand side eagerly, so \".a //= empty\" answers nothing where \".a // 9\" would not, and that is not a filter this build can hand over");
+        return Err("the //= operator is not supported: jq reads its right hand side eagerly, so \".a //= empty\" answers nothing where \".a // 9\" would not, and an erroring right hand side is raised even when the left is truthy. Writing it as \".a |= (. // 9)\" is exact for a pure right hand side and silently wrong for an impure one, so the shape is refused rather than approximated");
     }
     let op: String = update_at(p);
     if op == "" { return Ok(acc); }
@@ -154,6 +154,74 @@ fn parse_next(p: Cur, lit: String, ast: AList) -> Result[POut, String] {
     return parse_and(cur_step(p, 2), ast);
 }
 
+// A leftover that begins with a word jq reserves is refused by that word's own
+// name, not by the generic "unexpected character" sentence. `1 as $x | $x` and
+// `1 reduce . as $x (0; .)` both used to answer `unexpected "a" at character 3`,
+// which names neither the construct nor the reason -- while the SAME words at
+// the start of a filter were refused by name. A reader who writes a construct in
+// the one position this build happens to notice should be told the same thing
+// either way, and the generic message stays for a leftover that is not a word.
+fn leftover(c: Cur) -> String {
+    let ident: Result[Tok, String] = scan_ident(c);
+    match ident {
+        Err(e) => { return "unexpected \"" + cur_at(c) + "\" at " + show_where(c); }
+        Ok(t) => {
+            let said: String = reserved_word(t.text);
+            if chars_len(said) > 0 { return said; }
+            return "unexpected \"" + cur_at(c) + "\" at " + show_where(c);
+        }
+    }
+}
+
+fn check_filter_depth(text: String, max_depth: Int) -> Bool {
+    let n: Int = chars_len(text);
+    let mut depth: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = char_at(text, i);
+        if ch == "\"" {
+            let mut j: Int = i + 1;
+            while j < n {
+                let c: String = char_at(text, j);
+                if c == "\\" { j = j + 2; }
+                else if c == "\"" { j = j + 1; break; }
+                else { j = j + 1; }
+            }
+            i = j;
+            continue;
+        }
+        if ch == "(" || ch == "[" || ch == "{" {
+            depth = depth + 1;
+            if depth > max_depth { return false; }
+        } else if ch == ")" || ch == "]" || ch == "}" {
+            if depth > 0 { depth = depth - 1; }
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn check_ast_depth(ast: AList, max_depth: Int) -> Bool {
+    let n: Int = ast_len(ast);
+    if n > 10000 { return false; }
+    let mut depths: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let node: ANode = ast_at(ast, i);
+        let mut da: Int = 0;
+        let mut db: Int = 0;
+        if node.a >= 0 && node.a < i { da = list_get(depths, node.a); }
+        if node.b >= 0 && node.b < i { db = list_get(depths, node.b); }
+        let mut d: Int = da;
+        if db > da { d = db; }
+        d = d + 1;
+        if d > max_depth { return false; }
+        depths = list_push(depths, d);
+        i = i + 1;
+    }
+    return true;
+}
+
 // The one call the rest of the program makes. A filter is read whole or
 // refused whole; there is no partial parse to render.
 pub fn parse_filter(text: String) -> Result[POut, String] {
@@ -162,13 +230,22 @@ pub fn parse_filter(text: String) -> Result[POut, String] {
     if cur_end(c) {
         return Err("filter is empty");
     }
+    if chars_len(text) > 1048576 {
+        return Err("filter exceeds maximum size limit (1MB)");
+    }
+    if !check_filter_depth(text, 256) {
+        return Err("filter exceeds maximum nesting depth limit (256)");
+    }
     let got: Result[POut, String] = parse_pipe(c, ast_new());
     match got {
         Err(e) => { return Err(e); }
         Ok(r) => {
             let tail: Cur = cur_skip(r.cur);
             if !cur_end(tail) {
-                return Err("unexpected \"" + cur_at(tail) + "\" at " + show_where(tail));
+                return Err(leftover(tail));
+            }
+            if !check_ast_depth(r.ast, 256) {
+                return Err("filter exceeds maximum nesting depth limit (256)");
             }
             return Ok(r);
         }

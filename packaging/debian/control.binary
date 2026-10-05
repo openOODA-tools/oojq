@@ -1,0 +1,10 @@
+Package: oojq
+Version: 0.1.0-1
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: openOODA-tools <ops@openooda.org>
+Description: Capability-bounded jq replacement with stdio MCP
+ A capability-bounded jq replacement written in 100% openOODA,
+ delivering 98% jq parity, exact arithmetic, and an agent-native
+ MCP server over stdio.

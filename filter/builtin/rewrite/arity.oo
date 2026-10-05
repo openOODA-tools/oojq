@@ -1,0 +1,93 @@
+// # Arity Of A Call
+//
+// Logline: Refuses a body written after a builtin jq defines at no arity, because answering anyway is a wrong answer wearing a pass.
+// Setup: Pure, no capability needed. The question is a property of the name, so it is asked while the filter is read and never reaches a value.
+// Beats:
+//   1. Name the 47 builtins jq takes at no arity, measured rather than guessed.
+//   2. Keep sub and gsub out of it, since they are arity 2 and a body is legal.
+//   3. Say the sentence jq's own error says, which is length/1 is not defined.
+
+// A body written after one of these is not a filter this build cannot read, it
+// is a call that does not exist. jq refuses it while compiling, with
+// "length/1 is not defined", and oojq answered "length" anyway -- the argument
+// read as if it had not been written. That is the failure this page exists to
+// stop: silent, and the same value as the call the reader did not make.
+//
+// The list is measured, not remembered. Each of the 94 names this build knows
+// was asked about at arity 1 and at arity 2 against jq 1.8.1: a name refused at
+// BOTH takes no body at all, and a name refused only at arity 1 keeps its
+// two-argument form. That second test is the one that matters, because it is
+// what keeps sub and gsub out of this list -- "sub(\"a\")" is sub/1 and does not
+// exist, while "sub(\"a\";\"b\")" is sub/2 and does. Putting sub here would have
+// refused a call that works.
+//
+// It is a deny-list rather than an allow-list of the names that take a filter,
+// on purpose. Every name left out keeps behaving exactly as it does today, so a
+// builtin that takes a body and is not in this list is a gap in coverage rather
+// than a working call that stops working.
+fn no_body_names() -> List[String] {
+    let mut n: List[String] = list_new();
+    n = list_push(n, "abs");
+    n = list_push(n, "arrays");
+    n = list_push(n, "ascii_downcase");
+    n = list_push(n, "ascii_upcase");
+    n = list_push(n, "booleans");
+    n = list_push(n, "ceil");
+    n = list_push(n, "empty");
+    n = list_push(n, "explode");
+    n = list_push(n, "fabs");
+    n = list_push(n, "floor");
+    n = list_push(n, "fromdate");
+    n = list_push(n, "fromdateiso8601");
+    n = list_push(n, "from_entries");
+    n = list_push(n, "fromjson");
+    n = list_push(n, "gmtime");
+    n = list_push(n, "implode");
+    n = list_push(n, "isfinite");
+    n = list_push(n, "isinfinite");
+    n = list_push(n, "isnan");
+    n = list_push(n, "iterables");
+    n = list_push(n, "keys");
+    n = list_push(n, "keys_unsorted");
+    n = list_push(n, "leaf_paths");
+    n = list_push(n, "length");
+    n = list_push(n, "max");
+    n = list_push(n, "min");
+    n = list_push(n, "mktime");
+    n = list_push(n, "not");
+    n = list_push(n, "nulls");
+    n = list_push(n, "numbers");
+    n = list_push(n, "objects");
+    n = list_push(n, "reverse");
+    n = list_push(n, "round");
+    n = list_push(n, "scalars");
+    n = list_push(n, "sort");
+    n = list_push(n, "sqrt");
+    n = list_push(n, "strings");
+    n = list_push(n, "toboolean");
+    n = list_push(n, "todate");
+    n = list_push(n, "to_entries");
+    n = list_push(n, "tojson");
+    n = list_push(n, "tonumber");
+    n = list_push(n, "tostring");
+    n = list_push(n, "type");
+    n = list_push(n, "unique");
+    n = list_push(n, "utf8bytelength");
+    n = list_push(n, "values");
+    return n;
+}
+
+// An empty answer means the name takes a body, or is not one this build knows,
+// and the caller carries on untouched.
+pub fn wrong_arity(name: String) -> String {
+    let names: List[String] = no_body_names();
+    let mut i: Int = 0;
+    while i < list_len(names) {
+        if list_get(names, i) == name {
+            return "\"" + name + "\" takes no argument in jq: " + name
+                + "/1 is not defined, so a body written after it is a call that does not exist";
+        }
+        i = i + 1;
+    }
+    return "";
+}
