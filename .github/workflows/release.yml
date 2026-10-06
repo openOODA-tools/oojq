@@ -95,12 +95,31 @@ jobs:
           rpmbuild -bb ~/rpmbuild/SPECS/oojq.spec
           cp ~/rpmbuild/RPMS/x86_64/*.rpm .
 
+      - name: Build Arch package and stage PKGBUILD
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo apt-get install -y -qq zstd
+          mkdir -p arch-pkg/usr/bin
+          cp dist/oojq-linux-x86_64 arch-pkg/usr/bin/oojq
+          chmod 0755 arch-pkg/usr/bin/oojq
+          BIN_SIZE=$(stat -c %s dist/oojq-linux-x86_64)
+          BUILD_DATE=$(date +%s)
+          PKGVER="${GITHUB_REF_NAME#v}"
+          printf "pkgname = oojq\npkgbase = oojq\npkgver = ${PKGVER}-1\npkgdesc = Capability-bounded jq replacement with stdio MCP\nurl = https://github.com/openOODA-tools/oojq\nbuilddate = ${BUILD_DATE}\npackager = openOODA-tools <ops@openooda.org>\nsize = ${BIN_SIZE}\narch = x86_64\nlicense = Apache-2.0\ndepend = glibc\nprovides = oojq\n" > arch-pkg/.PKGINFO
+          tar --zstd -cf "oojq-${PKGVER}-1-x86_64.pkg.tar.zst" -C arch-pkg .PKGINFO usr
+          SHA256_VAL=$(awk '{print $1}' dist/oojq-linux-x86_64.sha256 2>/dev/null || sha256sum dist/oojq-linux-x86_64 | awk '{print $1}')
+          sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" oojq/packaging/PKGBUILD
+          sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256_VAL}')/" oojq/packaging/PKGBUILD
+          cp oojq/packaging/PKGBUILD ./PKGBUILD
+
       - uses: actions/upload-artifact@v4
         with:
           name: oojq-packages
           path: |
             ${{ github.workspace }}/*.deb
             ${{ github.workspace }}/*.rpm
+            ${{ github.workspace }}/*.pkg.tar.zst
+            ${{ github.workspace }}/PKGBUILD
 
   publish:
     needs: [build, package]
@@ -112,16 +131,27 @@ jobs:
         with:
           path: ${{ github.workspace }}/assets
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         working-directory: ${{ github.workspace }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           find assets -type f | sort
+          gh release upload "${GITHUB_REF_NAME}" \
+            assets/oojq-linux-x86_64/oojq-linux-x86_64 \
+            assets/oojq-linux-x86_64/oojq-linux-x86_64.sha256 \
+            assets/oojq-packages/*.deb \
+            assets/oojq-packages/*.rpm \
+            assets/oojq-packages/*.pkg.tar.zst \
+            assets/oojq-packages/PKGBUILD \
+            --clobber 2>/dev/null || \
           gh release create "${GITHUB_REF_NAME}" \
             --title "oojq ${GITHUB_REF_NAME}" \
             --notes "oojq ${GITHUB_REF_NAME}: Capability-bounded jq replacement with 98% jq parity, exact arithmetic, and an agent-native MCP server over stdio. 100% openOODA. Install: curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash" \
             assets/oojq-linux-x86_64/oojq-linux-x86_64 \
             assets/oojq-linux-x86_64/oojq-linux-x86_64.sha256 \
             assets/oojq-packages/*.deb \
-            assets/oojq-packages/*.rpm
+            assets/oojq-packages/*.rpm \
+            assets/oojq-packages/*.pkg.tar.zst \
+            assets/oojq-packages/PKGBUILD
+

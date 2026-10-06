@@ -1,0 +1,18 @@
+# Maintainer: openOODA-tools <ops@openooda.org>
+pkgname=oojq-bin
+_pkgname=oojq
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Capability-bounded jq replacement with stdio MCP"
+arch=('x86_64')
+url="https://github.com/openOODA-tools/oojq"
+license=('Apache-2.0')
+depends=('glibc')
+provides=('oojq')
+conflicts=('oojq')
+source=("${_pkgname}-${pkgver}::https://github.com/openOODA-tools/oojq/releases/download/v${pkgver}/oojq-linux-x86_64")
+sha256sums=('0b592553086cb713b5456a90faeeee7f5dc1a5a389751630c853ac89e44df10b')
+
+package() {
+    install -Dm755 "${srcdir}/${_pkgname}-${pkgver}" "${pkgdir}/usr/bin/oojq"
+}

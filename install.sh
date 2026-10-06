@@ -145,6 +145,9 @@ DRY_RUN=0
 DO_UNINSTALL=0
 DO_VERIFY=0
 CUSTOM_PREFIX=""
+INSTALL_DEB=0
+INSTALL_DNF=0
+INSTALL_ARCH=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -152,16 +155,27 @@ while [ $# -gt 0 ]; do
         --uninstall) DO_UNINSTALL=1; shift ;;
         --verify) DO_VERIFY=1; shift ;;
         --prefix) CUSTOM_PREFIX="$2"; shift 2 ;;
+        --deb|--apt) INSTALL_DEB=1; shift ;;
+        --dnf|--rpm) INSTALL_DNF=1; shift ;;
+        --pkgbuild|--arch) INSTALL_ARCH=1; shift ;;
         -h|--help)
             banner
             say "  ${BOLD}Usage:${RESET} curl -fsSL .../install.sh | bash [options]"
             say ""
             say "  ${BOLD}Options:${RESET}"
-            say "    ${CYAN}--prefix <dir>${RESET}   Target binary directory (default: /usr/local/bin or ~/.local/bin)"
-            say "    ${CYAN}--dry-run${RESET}        Simulate deployment without modifying host"
-            say "    ${CYAN}--verify${RESET}         Verify cryptographic SHA-256 seal and exit"
-            say "    ${CYAN}--uninstall${RESET}      Cleanly remove oojq binary from system"
-            say "    ${CYAN}-h, --help${RESET}       Display this manual"
+            say "    ${CYAN}--prefix <dir>${RESET}     Target binary directory (default: /usr/local/bin or ~/.local/bin)"
+            say "    ${CYAN}--deb, --apt${RESET}       Download and install Debian package (.deb) via apt/dpkg"
+            say "    ${CYAN}--dnf, --rpm${RESET}       Download and install RPM package (.rpm) via dnf"
+            say "    ${CYAN}--pkgbuild, --arch${RESET} Download and install Arch Linux package via makepkg"
+            say "    ${CYAN}--dry-run${RESET}          Simulate deployment without modifying host"
+            say "    ${CYAN}--verify${RESET}           Verify cryptographic SHA-256 seal and exit"
+            say "    ${CYAN}--uninstall${RESET}        Cleanly remove oojq binary and packages from system"
+            say "    ${CYAN}-h, --help${RESET}         Display this manual"
+            say ""
+            say "  ${BOLD}Direct Package Manager Invocations:${RESET}"
+            say "    ${CYAN}DNF:${RESET}      curl -fsSL ${CANONICAL_URL}/install.sh | bash -s -- --dnf"
+            say "    ${CYAN}APT:${RESET}      curl -fsSL ${CANONICAL_URL}/install.sh | bash -s -- --deb"
+            say "    ${CYAN}PKGBUILD:${RESET} curl -fsSL ${CANONICAL_URL}/install.sh | bash -s -- --pkgbuild"
             say ""
             exit 0
             ;;
@@ -176,15 +190,29 @@ pause 0.3
 # --- Uninstall Path -----------------------------------------------------------
 if [ "$DO_UNINSTALL" -eq 1 ]; then
     step "Relinquishing oojq"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        dim "Would remove oojq binary or packages"
+        ok "Simulation complete."
+        exit 0
+    fi
+    if command -v dpkg >/dev/null 2>&1 && dpkg -s oojq >/dev/null 2>&1; then
+        sudo apt-get remove -y oojq 2>/dev/null || sudo dpkg -r oojq 2>/dev/null || true
+        ok "Removed oojq Debian package"
+    elif command -v rpm >/dev/null 2>&1 && rpm -q oojq >/dev/null 2>&1; then
+        sudo dnf remove -y oojq 2>/dev/null || sudo rpm -e oojq 2>/dev/null || true
+        ok "Removed oojq RPM package"
+    elif command -v pacman >/dev/null 2>&1 && pacman -Q oojq >/dev/null 2>&1; then
+        sudo pacman -R --noconfirm oojq 2>/dev/null || true
+        ok "Removed oojq Arch package"
+    elif command -v pacman >/dev/null 2>&1 && pacman -Q oojq-bin >/dev/null 2>&1; then
+        sudo pacman -R --noconfirm oojq-bin 2>/dev/null || true
+        ok "Removed oojq Arch package"
+    fi
     FOUND=0
-    for p in /usr/local/bin/oojq "${HOME}/.local/bin/oojq" "${HOME}/.openooda/bin/oojq"; do
+    for p in /usr/local/bin/oojq "${HOME}/.local/bin/oojq" "${HOME}/.openooda/bin/oojq" /usr/bin/oojq; do
         if [ -f "$p" ]; then
-            if [ "$DRY_RUN" -eq 1 ]; then
-                dim "Would remove $p"
-            else
-                rm -f "$p" 2>/dev/null || sudo rm -f "$p"
-                ok "Banished ${BOLD}$p${RESET}"
-            fi
+            rm -f "$p" 2>/dev/null || sudo rm -f "$p"
+            ok "Banished ${BOLD}$p${RESET}"
             FOUND=1
         fi
     done
@@ -192,6 +220,76 @@ if [ "$DO_UNINSTALL" -eq 1 ]; then
         warn "No existing oojq binary detected in standard search paths."
     fi
     say ""
+    exit 0
+fi
+
+# --- DEB / APT Installation ---
+if [ "$INSTALL_DEB" -eq 1 ]; then
+    step "Installing oojq via DEB/apt (${VERSION_PIN})"
+    RAW_VERSION="${VERSION_PIN#v}"
+    DEB_NAME="oojq_${RAW_VERSION}-1_amd64.deb"
+    DEB_URL="${GITHUB_URL}/releases/download/${VERSION_PIN}/${DEB_NAME}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "  ${DIM}fetch${RESET}   ${CYAN}${DEB_URL}${RESET}"
+        say "  ${DIM}deploy${RESET}  ${CYAN}sudo dpkg -i ... || sudo apt-get install -f -y${RESET}"
+        ok "Simulation complete."
+        exit 0
+    fi
+    TMP_DEB="$(mktemp /tmp/oojq-deb.XXXXXX.deb)"
+    story_line "Fetching Debian package from sovereign release channel…"
+    curl -fsSL "$DEB_URL" -o "$TMP_DEB" &
+    spin_while $! "Streaming ${DEB_NAME}"
+    sudo dpkg -i "$TMP_DEB" || sudo apt-get install -f -y
+    rm -f "$TMP_DEB"
+    ok "Installed oojq Debian package."
+    oojq --version
+    exit 0
+fi
+
+# --- DNF / RPM Installation ---
+if [ "$INSTALL_DNF" -eq 1 ]; then
+    step "Installing oojq via DNF/rpm (${VERSION_PIN})"
+    RAW_VERSION="${VERSION_PIN#v}"
+    RPM_NAME="oojq-${RAW_VERSION}-1.x86_64.rpm"
+    RPM_URL="${GITHUB_URL}/releases/download/${VERSION_PIN}/${RPM_NAME}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "  ${DIM}fetch${RESET}   ${CYAN}${RPM_URL}${RESET}"
+        say "  ${DIM}deploy${RESET}  ${CYAN}sudo dnf install -y ${RPM_URL}${RESET}"
+        ok "Simulation complete."
+        exit 0
+    fi
+    sudo dnf install -y "$RPM_URL"
+    ok "Installed oojq RPM package."
+    oojq --version
+    exit 0
+fi
+
+# --- Arch Linux / PKGBUILD Installation ---
+if [ "$INSTALL_ARCH" -eq 1 ]; then
+    step "Installing oojq via PKGBUILD (${VERSION_PIN})"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "  ${DIM}fetch${RESET}   ${CYAN}${CANONICAL_URL}/PKGBUILD${RESET}"
+        say "  ${DIM}deploy${RESET}  ${CYAN}makepkg -si --noconfirm${RESET}"
+        ok "Simulation complete."
+        exit 0
+    fi
+    if ! command -v makepkg >/dev/null 2>&1; then
+        err "makepkg not found. Install base-devel on Arch Linux or install the standalone binary."
+        exit 1
+    fi
+    BUILD_DIR="$(mktemp -d /tmp/oojq-pkgbuild.XXXXXX)"
+    if [ -f "./packaging/PKGBUILD" ]; then
+        cp "./packaging/PKGBUILD" "$BUILD_DIR/PKGBUILD"
+    elif [ -f "./packaging/arch/PKGBUILD" ]; then
+        cp "./packaging/arch/PKGBUILD" "$BUILD_DIR/PKGBUILD"
+    else
+        curl -fsSL "${CANONICAL_URL}/PKGBUILD" -o "$BUILD_DIR/PKGBUILD" 2>/dev/null || \
+        curl -fsSL "${GITHUB_URL}/raw/main/packaging/PKGBUILD" -o "$BUILD_DIR/PKGBUILD"
+    fi
+    (cd "$BUILD_DIR" && makepkg -si --noconfirm)
+    rm -rf "$BUILD_DIR"
+    ok "Installed oojq via PKGBUILD."
+    oojq --version
     exit 0
 fi
 

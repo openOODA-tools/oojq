@@ -734,15 +734,41 @@ Installs the standalone native binary to `/usr/local/bin` (or `~/.local/bin`) wi
 curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash
 ```
 
-### Native Packages (APT & DNF)
-Prebuilt packages are attached to every [GitHub Release](https://github.com/openOODA-tools/oojq/releases):
+### DNF (Fedora, RHEL, CentOS, Rocky Linux, AlmaLinux)
+Install directly from the sovereign release channel or download the RPM package:
 
 ```bash
-# Debian, Ubuntu (APT)
-sudo apt install ./oojq_0.1.0-1_amd64.deb
+# Direct remote install via DNF
+sudo dnf install https://github.com/openOODA-tools/oojq/releases/download/v0.1.0/oojq-0.1.0-1.x86_64.rpm
 
-# Fedora, RHEL, Rocky, Alma (DNF)
+# Or download and install locally
 sudo dnf install ./oojq-0.1.0-1.*.rpm
+```
+
+### APT / DEB (Debian, Ubuntu, Linux Mint, Pop!_OS)
+Download and install the Debian binary package via APT:
+
+```bash
+# Fetch and install via APT
+curl -fsSLO https://github.com/openOODA-tools/oojq/releases/download/v0.1.0/oojq_0.1.0-1_amd64.deb
+sudo apt install ./oojq_0.1.0-1_amd64.deb
+```
+
+### PKGBUILD (Arch Linux, Manjaro, EndeavourOS, SteamOS)
+Build and install using `makepkg` and the provided Arch Linux `PKGBUILD`:
+
+```bash
+# Option A: From cloned repository
+git clone https://github.com/openOODA-tools/oojq.git
+cd oojq/packaging
+makepkg -si
+
+# Option B: Direct download of PKGBUILD
+curl -fsSL https://openooda-tools.github.io/oojq/PKGBUILD -O
+makepkg -si
+
+# Option C: Prebuilt Pacman package
+sudo pacman -U https://github.com/openOODA-tools/oojq/releases/download/v0.1.0/oojq-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
 ### Installer Options
@@ -767,8 +793,9 @@ make build       # compile main.oo to dist/oojq
 make test        # 1036 behavioural assertions against the built binary
 make parity      # byte-compare every filter against the real jq
 make verify      # line-cap, file-law, academy, density, suggest-audit, dead-tests, dup-names, check
-make package     # build .deb and .rpm packages
+make package     # build .deb, .rpm, and .pkg.tar.zst packages
 ```
+
 
 `make parity` runs the same filters through the installed `jq` and through
 oojq, in all three output modes — plain, `-c`, and `-r` — and compares the bytes.
