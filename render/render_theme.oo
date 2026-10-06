@@ -69,3 +69,23 @@ pub fn theme_config_path(home: String) -> String {
     if str_ends_with(home, "/") { return home + ".openooda/theme.oot"; }
     return home + "/.openooda/theme.oot";
 }
+
+pub fn resolve_json_theme(fs: &FsReadCap, env: &EnvCap) -> String {
+    let env_t: Result[String, String] = env_get(env, "OODA_THEME");
+    if env_t.is_ok() {
+        let t: String = match env_t { Ok(s) => s, Err(_) => "" };
+        if t != "" { return t; }
+    }
+    let env_home: Result[String, String] = env_get(env, "OODA_HOME");
+    let mut home: String = match env_home { Ok(s) => s, Err(_) => "" };
+    if home == "" {
+        let env_w: Result[String, String] = env_get(env, "OODA_FS_WRITEDIR");
+        home = match env_w { Ok(s) => s, Err(_) => "" };
+    }
+    let p: String = theme_config_path(home);
+    let r: Result[String, String] = read_file(fs, p);
+    if r.is_err() { return "auto"; }
+    let content: String = match r { Ok(s) => s, Err(_) => "" };
+    let t: String = parse_theme_key(content, "theme");
+    return if t != "" { t } else { "auto"; };
+}

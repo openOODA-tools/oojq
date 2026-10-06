@@ -17,7 +17,8 @@ type Query = struct {
     path: String,
     compact: Bool,
     raw: Bool,
-    exit_status: Bool
+    exit_status: Bool,
+    color: Bool
 };
 
 // jq lets short flags be run together, so -ce is two flags and not a filter
@@ -29,7 +30,7 @@ fn is_short_run(a: String) -> Bool {
     let mut i: Int = 1;
     while i < n {
         let ch: String = char_at(a, i);
-        if ch != "c" && ch != "e" && ch != "r" { return false; }
+        if ch != "c" && ch != "e" && ch != "r" && ch != "C" && ch != "M" { return false; }
         i = i + 1;
     }
     return true;
@@ -55,6 +56,7 @@ pub fn resolve_args(fs: &FsReadCap, args: List[String]) -> Result[Query, String]
     let mut compact: Bool = false;
     let mut raw: Bool = false;
     let mut exit_status: Bool = false;
+    let mut color: Bool = false;
     let mut i: Int = 0;
     while i < list_len(args) {
         let a: String = list_get(args, i);
@@ -67,6 +69,10 @@ pub fn resolve_args(fs: &FsReadCap, args: List[String]) -> Result[Query, String]
             exit_status = true;
         } else if a == "-r" || a == "--raw-output" {
             raw = true;
+        } else if a == "-C" || a == "--color-output" || a == "--color" {
+            color = true;
+        } else if a == "-M" || a == "--monochrome-output" || a == "--no-color" {
+            color = false;
         } else if is_short_run(a) {
             let n2: Int = chars_len(a);
             let mut k: Int = 1;
@@ -75,6 +81,8 @@ pub fn resolve_args(fs: &FsReadCap, args: List[String]) -> Result[Query, String]
                 if ch == "c" { compact = true; }
                 if ch == "e" { exit_status = true; }
                 if ch == "r" { raw = true; }
+                if ch == "C" { color = true; }
+                if ch == "M" { color = false; }
                 k = k + 1;
             }
         } else if i > 0 && is_input_file(fs, a) {
@@ -88,5 +96,5 @@ pub fn resolve_args(fs: &FsReadCap, args: List[String]) -> Result[Query, String]
     if chars_len(trimmed) == 0 {
         return Err("no filter given");
     }
-    return Ok(Query { filter: trimmed, path: path, compact: compact, raw: raw, exit_status: exit_status });
+    return Ok(Query { filter: trimmed, path: path, compact: compact, raw: raw, exit_status: exit_status, color: color });
 }

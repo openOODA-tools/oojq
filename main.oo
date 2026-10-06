@@ -19,7 +19,7 @@ import "ipc/read_source.oo";
 import "ipc/resolve_args.oo";
 import "ipc/mcp_serve.oo";
 
-pub fn main(fs: &FsReadCap, proc_cap: &ProcessCap, args: List[String]) -> Result[Int, String] {
+pub fn main(fs: &FsReadCap, proc_cap: &ProcessCap, env: &EnvCap, args: List[String]) -> Result[Int, String] {
     if list_len(args) == 0 {
         print(render_usage("no filter given"));
         process_exit(2);
@@ -47,6 +47,7 @@ pub fn main(fs: &FsReadCap, proc_cap: &ProcessCap, args: List[String]) -> Result
             Ok(c) => { return Ok(c); }
         }
     }
+    let theme: String = resolve_json_theme(fs, env);
     match resolve_args(fs, args) {
         Err(e) => {
             print(render_usage(e));
@@ -54,7 +55,12 @@ pub fn main(fs: &FsReadCap, proc_cap: &ProcessCap, args: List[String]) -> Result
             return Ok(2);
         }
         Ok(q) => {
-            match run_query(fs, q) {
+            let mut active_q: Query = q;
+            let env_color: Result[String, String] = env_get(env, "OODA_COLOR");
+            if env_color.is_ok() && (match env_color { Ok(s) => s == "1", Err(_) => false }) {
+                active_q.color = true;
+            }
+            match run_query(fs, active_q, theme) {
                 Err(e) => {
                     print("oojq: " + e + "\n");
                     process_exit(2);
@@ -74,7 +80,7 @@ pub fn main(fs: &FsReadCap, proc_cap: &ProcessCap, args: List[String]) -> Result
 // otherwise be a sixth parameter and the signature would grow instead of the
 // type. Returning the code rather than exiting lets the caller own ProcessCap
 // exactly once.
-pub fn run_query(fs: &FsReadCap, q: Query) -> Result[Int, String] {
+pub fn run_query(fs: &FsReadCap, q: Query, theme: String) -> Result[Int, String] {
     let filt: String = q.filter;
     let path: String = q.path;
     let compact: Bool = q.compact;
@@ -99,7 +105,11 @@ pub fn run_query(fs: &FsReadCap, q: Query) -> Result[Int, String] {
         if exit_status { return Ok(4); }
         return Ok(1);
     }
-    let mut text: String = render_stream(out_doc, roots, compact);
+    let mut text: String = if q.color && !q.raw {
+        render_stream_color(out_doc, roots, compact, true, theme)
+    } else {
+        render_stream(out_doc, roots, compact)
+    };
     if q.raw { text = render_raw_stream(out_doc, roots, compact); }
     print(text + "\n");
     // With -e the status reports the last value, which is what jq means by it:
