@@ -201,7 +201,7 @@ fn bound_node(text: String) -> JVal {
     return jval_float(text);
 }
 
-fn range_parts(text: String) -> List[String] {
+pub fn range_parts(text: String) -> List[String] {
     let n: Int = chars_len(text);
     let mut out: List[String] = list_new();
     let mut cur: String = "";

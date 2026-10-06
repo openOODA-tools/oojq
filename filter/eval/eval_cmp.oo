@@ -55,12 +55,11 @@ fn same_pair(doc: JDoc, x: Int, y: Int) -> Bool {
 }
 
 fn same_array(doc: JDoc, a: JVal, b: JVal) -> Bool {
-    if list_len(a.kids) != list_len(b.kids) { return false; }
+    let akids: List[Int] = a.kids;
+    if list_len(akids) != list_len(b.kids) { return false; }
     let mut i: Int = 0;
-    while i < list_len(a.kids) {
-        let x: Int = list_get(a.kids, i);
-        let y: Int = list_get(b.kids, i);
-        if !same_pair(doc, x, y) { return false; }
+    while i < list_len(akids) {
+        if !same_pair(doc, list_get(akids, i), list_get(b.kids, i)) { return false; }
         i = i + 1;
     }
     return true;

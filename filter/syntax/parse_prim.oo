@@ -38,7 +38,7 @@ pub fn reserved_word(w: String) -> String {
     return "";
 }
 
-fn parse_primary(c0: Cur, ast: AList) -> Result[POut, String] {
+pub fn parse_primary(c0: Cur, ast: AList) -> Result[POut, String] {
     let c: Cur = cur_skip(c0);
     if cur_end(c) {
         return Err("filter ends where a value was expected");
@@ -112,7 +112,7 @@ fn parse_bracket_or_name(c: Cur, ast: AList) -> Result[POut, String] {
 // .["a"] and .[0] are the only subscripts this build reads, and both are a
 // member or a position written in full. Anything else is refused rather than
 // guessed here, because guessing here returns the wrong value silently.
-fn literal_subscript(c: Cur, probe: Cur, t: Tok, r: POut) -> Result[POut, String] {
+pub fn literal_subscript(c: Cur, probe: Cur, t: Tok, r: POut) -> Result[POut, String] {
     let inner: String = trim_ws(t.text);
     if cur_has(probe, "\"") {
         let sr: Result[Tok, String] = scan_string(probe);

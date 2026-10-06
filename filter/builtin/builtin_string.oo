@@ -39,9 +39,10 @@ pub fn builtin_has(doc: JDoc, idx: Int, key: String, arg: Int) -> Result[SRes, S
         if k.kind != "string" {
             return Err("Cannot check whether object has a " + kind_word(k.kind) + " key");
         }
+        let keys: List[String] = v.keys;
         let mut i: Int = 0;
-        while i < list_len(v.keys) {
-            if list_get(v.keys, i) == key {
+        while i < list_len(keys) {
+            if list_get(keys, i) == key {
                 return Ok(bool_result(doc, true));
             }
             i = i + 1;

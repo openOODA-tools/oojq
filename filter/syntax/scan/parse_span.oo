@@ -164,7 +164,7 @@ pub fn find_any_kw(c: Cur, w1: String, w2: String, w3: String) -> Int {
 // A conditional keeps its branches as text. An elif becomes a nested if, which
 // is the same filter written the other way round, so the evaluator only ever
 // has to understand if and else.
-fn parse_if_body(c: Cur, ast: AList) -> Result[POut, String] {
+pub fn parse_if_body(c: Cur, ast: AList) -> Result[POut, String] {
     let tpos: Int = find_kw(c, "then");
     if tpos < 0 {
         return Err("if without then");

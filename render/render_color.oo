@@ -1,0 +1,104 @@
+// # Terminal JSON Color Formatting
+//
+// Logline: Generates ANSI escape sequences for theme-aware JSON syntax highlighting.
+//
+// Setup: Pure string formatting using explicit byte construction for ESC characters.
+//
+// Beats:
+//   1. Colorize syntax keywords (null, true, false) with syntax_keyword.
+//   2. Colorize JSON string literals with syntax_string.
+//   3. Colorize numbers with syntax_number.
+//   4. Colorize structural punctuation (brackets, braces, commas, colons) with syntax_punct.
+
+import "render_string.oo";
+import "render_value.oo";
+import "parse/anchor.oo";
+
+fn esc_sgr(code: String, text: String, enabled: Bool) -> String {
+    if !enabled { return text; }
+    let esc: String = bytes_to_str(bytes_push(bytes_new(), 27));
+    return esc + "[" + code + "m" + text + esc + "[0m";
+}
+
+pub fn color_syntax_keyword(text: String, enabled: Bool) -> String {
+    return esc_sgr("33", text, enabled);
+}
+
+pub fn color_syntax_string(text: String, enabled: Bool) -> String {
+    return esc_sgr("32", text, enabled);
+}
+
+pub fn color_syntax_number(text: String, enabled: Bool) -> String {
+    return esc_sgr("31", text, enabled);
+}
+
+pub fn color_syntax_punct(text: String, enabled: Bool) -> String {
+    return esc_sgr("90", text, enabled);
+}
+
+fn render_scalar_color(v: JVal, use_color: Bool) -> String {
+    let k: String = v.kind;
+    if k == "null" { return color_syntax_keyword("null", use_color); }
+    if k == "bool" {
+        if v.bval { return color_syntax_keyword("true", use_color); }
+        return color_syntax_keyword("false", use_color);
+    }
+    if k == "int" { return color_syntax_number(v.ival.to_string(), use_color); }
+    if k == "float" { return color_syntax_number(v.sval, use_color); }
+    if k == "string" {
+        let s: String = "\"" + render_string(v.sval) + "\"";
+        return color_syntax_string(s, use_color);
+    }
+    return "null";
+}
+
+pub fn render_node_color(doc: JDoc, idx: Int, depth: Int, compact: Bool, use_color: Bool) -> String {
+    let v: JVal = jval_at(doc, idx);
+    let k: String = v.kind;
+    if k != "array" && k != "object" { return render_scalar_color(v, use_color); }
+    let kids: List[Int] = v.kids;
+    let p_lbr: String = color_syntax_punct("[", use_color);
+    let p_rbr: String = color_syntax_punct("]", use_color);
+    let p_lcu: String = color_syntax_punct("{", use_color);
+    let p_rcu: String = color_syntax_punct("}", use_color);
+    let p_com: String = color_syntax_punct(",", use_color);
+    let p_col: String = color_syntax_punct(":", use_color);
+    if k == "array" {
+        if list_len(kids) == 0 { return p_lbr + p_rbr; }
+        let sep: String = if compact { p_com } else { p_com + "\n" };
+        let mut out: String = if compact { p_lbr } else { p_lbr + "\n" };
+        let mut i: Int = 0;
+        while i < list_len(kids) {
+            if i > 0 { out = out + sep; }
+            if !compact { out = out + render_indent(depth + 1); }
+            out = out + render_node_color(doc, list_get(kids, i), depth + 1, compact, use_color);
+            i = i + 1;
+        }
+        return if compact { out + p_rbr } else { out + "\n" + render_indent(depth) + p_rbr };
+    }
+    let keys: List[String] = v.keys;
+    if list_len(keys) == 0 { return p_lcu + p_rcu; }
+    let sep: String = if compact { p_com } else { p_com + "\n" };
+    let c_sep: String = if compact { p_col } else { p_col + " " };
+    let mut out: String = if compact { p_lcu } else { p_lcu + "\n" };
+    let mut i: Int = 0;
+    while i < list_len(keys) {
+        if i > 0 { out = out + sep; }
+        if !compact { out = out + render_indent(depth + 1); }
+        let k_str: String = color_syntax_string("\"" + render_string(list_get(keys, i)) + "\"", use_color);
+        out = out + k_str + c_sep + render_node_color(doc, list_get(kids, i), depth + 1, compact, use_color);
+        i = i + 1;
+    }
+    return if compact { out + p_rcu } else { out + "\n" + render_indent(depth) + p_rcu };
+}
+
+pub fn render_stream_color(doc: JDoc, roots: List[Int], compact: Bool, use_color: Bool) -> String {
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < list_len(roots) {
+        if i > 0 { out = out + "\n"; }
+        out = out + render_node_color(doc, list_get(roots, i), 0, compact, use_color);
+        i = i + 1;
+    }
+    return out;
+}

@@ -80,7 +80,7 @@ fn align(a: Num, b: Num) -> AL {
     return AL { x: x, y: y, w: w };
 }
 
-fn add_run(x: String, y: String) -> String {
+pub fn add_run(x: String, y: String) -> String {
     let mut i: Int = chars_len(x) - 1;
     let mut j: Int = chars_len(y) - 1;
     let mut carry: Int = 0;

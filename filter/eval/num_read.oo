@@ -20,7 +20,7 @@ pub fn num_is_zero(n: Num) -> Bool {
     return n.ip == "0" && n.fp == "";
 }
 
-fn zeros(k: Int) -> String {
+pub fn zeros(k: Int) -> String {
     let mut s: String = "";
     let mut i: Int = 0;
     while i < k {
@@ -30,7 +30,7 @@ fn zeros(k: Int) -> String {
     return s;
 }
 
-fn strip_lead_zeros(s: String) -> String {
+pub fn strip_lead_zeros(s: String) -> String {
     let n: Int = chars_len(s);
     let mut i: Int = 0;
     while i < n - 1 && char_at(s, i) == "0" {
@@ -77,7 +77,7 @@ pub fn digit_at(s: String, i: Int) -> Int {
     return digit_of(char_at(s, i));
 }
 
-fn char_of_digit(d: Int) -> String {
+pub fn char_of_digit(d: Int) -> String {
     let s: String = "0123456789";
     return char_at(s, d);
 }

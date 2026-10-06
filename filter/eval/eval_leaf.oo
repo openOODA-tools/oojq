@@ -37,10 +37,11 @@ pub fn leaf_field(doc: JDoc, idx: Int, name: String) -> Result[SRes, String] {
     if v.kind != "object" {
         return Err(index_named(v.kind, name));
     }
+    let keys: List[String] = v.keys;
     let mut here: Int = 0 - 1;
     let mut i: Int = 0;
-    while i < list_len(v.keys) {
-        if list_get(v.keys, i) == name { here = i; }
+    while i < list_len(keys) {
+        if list_get(keys, i) == name { here = i; }
         i = i + 1;
     }
     if here < 0 { return Ok(null_result(doc)); }

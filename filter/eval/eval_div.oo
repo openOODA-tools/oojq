@@ -16,7 +16,7 @@ import "filter/select_node.oo";
 import "render/render_value.oo";
 import "std/core/primitives/str.oo";
 
-fn repeat_to(s: String, n: Int) -> String {
+pub fn repeat_to(s: String, n: Int) -> String {
     let mut out: String = "";
     let mut i: Int = 0;
     while i < n {

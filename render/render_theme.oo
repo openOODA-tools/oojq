@@ -1,0 +1,71 @@
+// # JSON Syntax Theme - Configuration Resolver
+//
+// Logline: Hydrates JSON syntax highlight tokens from ~/.openooda/theme.oot and environment variables.
+//
+// Setup: Pure string parser and token mapper. Operates with zero ambient authority.
+//
+// Beats:
+//   1. Parse key-value bindings from theme.oot configuration text.
+//   2. Extract theme name and lighting mode from configuration text.
+//   3. Map syntax tokens (syntax_keyword, syntax_string, syntax_number, syntax_punct) to ANSI codes.
+//   4. Resolve default configuration path under openOODA home directory.
+
+pub fn parse_theme_val(line: String, key: String) -> String {
+    let trimmed: String = str_trim(line);
+    if !str_starts_with(trimmed, key) { return ""; }
+    let rest: String = str_trim(str_slice(trimmed, chars_len(key), chars_len(trimmed)));
+    if !str_starts_with(rest, "=") { return ""; }
+    let mut val: String = str_trim(str_slice(rest, 1, chars_len(rest)));
+    if str_starts_with(val, "\"") && str_ends_with(val, "\"") {
+        let n: Int = chars_len(val);
+        if n >= 2 { val = str_slice(val, 1, n - 1); }
+    }
+    return val;
+}
+
+pub fn parse_theme_key(content: String, key: String) -> String {
+    let n: Int = chars_len(content);
+    let mut cur: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(content, i);
+        if c == "\n" {
+            let v: String = parse_theme_val(cur, key);
+            if v != "" { return v; }
+            cur = "";
+        } else if c != "\r" {
+            cur = cur + c;
+        }
+        i = i + 1;
+    }
+    if cur != "" {
+        let v: String = parse_theme_val(cur, key);
+        if v != "" { return v; }
+    }
+    return "";
+}
+
+pub fn theme_syntax_keyword(theme: String) -> String {
+    if theme == "1982" || theme == "cyberpunk" { return "35"; }
+    return "33";
+}
+
+pub fn theme_syntax_string(theme: String) -> String {
+    if theme == "1982" || theme == "cyberpunk" { return "36"; }
+    return "32";
+}
+
+pub fn theme_syntax_number(theme: String) -> String {
+    if theme == "1982" || theme == "cyberpunk" { return "33"; }
+    return "31";
+}
+
+pub fn theme_syntax_punct(theme: String) -> String {
+    return "90";
+}
+
+pub fn theme_config_path(home: String) -> String {
+    if chars_len(home) == 0 { return "theme.oot"; }
+    if str_ends_with(home, "/") { return home + ".openooda/theme.oot"; }
+    return home + "/.openooda/theme.oot";
+}
