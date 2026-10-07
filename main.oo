@@ -31,7 +31,7 @@ pub fn main(fs: &FsReadCap, proc_cap: &ProcessCap, env: &EnvCap, args: List[Stri
         return Ok(0);
     }
     if first == "-V" || first == "--version" {
-        print("oojq 0.1.0\n");
+        print("oojq 0.1.1\n");
         return Ok(0);
     }
     // The MCP surface is a mode, not a filter, so it is answered before argv is
@@ -124,7 +124,7 @@ pub fn run_query(fs: &FsReadCap, q: Query, theme: String) -> Result[Int, String]
 }
 
 fn render_help() -> String {
-    return "oojq 0.1.0\n"
+    return "oojq 0.1.1\n"
         + "usage: oojq [-c] [-r] [-e] <filter> [file]\n"
         + "\n"
         + "Options:\n"

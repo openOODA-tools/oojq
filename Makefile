@@ -88,8 +88,8 @@ file-law:
 		fi; \
 	done; \
 	for f in $$(find . -name "*.sh" -not -path "./.git/*" -not -path "./dist/*" 2>/dev/null); do \
-		if [ "$$f" != "./install.sh" ]; then \
-			echo "VIOLATION: .sh forbidden outside install.sh: $$f"; violations=$$((violations+1)); \
+		if [ "$$f" != "./install.sh" ] && [ "$$f" != "./uninstall.sh" ]; then \
+			echo "VIOLATION: .sh forbidden outside install.sh and uninstall.sh: $$f"; violations=$$((violations+1)); \
 		fi; \
 	done; \
 	if [ $$violations -gt 0 ]; then echo "FAIL: file-law violations"; exit 1; fi; \
@@ -422,7 +422,7 @@ test: build
 	assert_code "$$(./$(BIN) --version >/dev/null 2>&1; echo $$?)" 0 "version exits 0"; \
 	assert_out "$$(printf 'null' | ./$(BIN) -c '2|sqrt' 2>/dev/null)" "oojq: filter \"2|sqrt\": \"sqrt\" has no exact answer here for a value that is not a square, and a rounded root would be a wrong answer" "a refusal goes to STDOUT, which is a divergence from jq and is asserted so it stays visible"; \
 	assert_out "$$(printf 'null' | ./$(BIN) -c '2|sqrt' 1>/dev/null)" "" "and writes nothing to stderr, because this runtime has no stderr writer at all"; \
-	assert_out "$$(printf 'null' | ./$(BIN) --version 2>/dev/null)" "oojq 0.1.0" "and the version is on stdout, as it is in jq"; \
+	assert_out "$$(printf 'null' | ./$(BIN) --version 2>/dev/null)" "oojq 0.1.1" "and the version is on stdout, as it is in jq"; \
 	assert_out "$$(./$(BIN) .name $(TMPDOC) 2>&1 | tr '\n' '|')" '"oojq"|' "reads a named file"; \
 	assert_out "$$(./$(BIN) .name $(TMPDOC) 2>&1 | md5sum)" "$$(echo '$(DOC)' | ./$(BIN) .name 2>&1 | md5sum)" "file and stdin agree byte for byte"; \
 	assert_out "$$(run '.' | md5sum)" "$$(run '.' | md5sum)" "double run is byte identical"; \
@@ -1669,6 +1669,8 @@ package-deb: $(BIN)
 	@sed "s/^Version:.*/Version: $(VERSION)-1/" packaging/debian/control.binary > dist/deb-root/DEBIAN/control
 	@cp $(BIN) dist/deb-root/usr/bin/oojq
 	@chmod 0755 dist/deb-root/usr/bin/oojq
+	@cp uninstall.sh dist/deb-root/usr/bin/oojq-uninstall
+	@chmod 0755 dist/deb-root/usr/bin/oojq-uninstall
 	@dpkg-deb --build --root-owner-group dist/deb-root dist/oojq_$(VERSION)-1_amd64.deb
 	@rm -rf dist/deb-root
 	@echo "built dist/oojq_$(VERSION)-1_amd64.deb"
@@ -1676,6 +1678,7 @@ package-deb: $(BIN)
 package-rpm: $(BIN)
 	@mkdir -p ~/rpmbuild/SOURCES ~/rpmbuild/SPECS ~/rpmbuild/RPMS
 	@cp $(BIN) ~/rpmbuild/SOURCES/oojq-linux-x86_64
+	@cp uninstall.sh ~/rpmbuild/SOURCES/uninstall.sh
 	@sed "s/^Version:.*/Version: $(VERSION)/" packaging/oojq.spec > ~/rpmbuild/SPECS/oojq.spec
 	@rpmbuild -bb ~/rpmbuild/SPECS/oojq.spec
 	@cp ~/rpmbuild/RPMS/x86_64/oojq-$(VERSION)*.rpm dist/
@@ -1685,10 +1688,14 @@ package-arch: $(BIN)
 	@mkdir -p dist/arch-pkg/usr/bin
 	@cp $(BIN) dist/arch-pkg/usr/bin/oojq
 	@chmod 0755 dist/arch-pkg/usr/bin/oojq
+	@cp uninstall.sh dist/arch-pkg/usr/bin/oojq-uninstall
+	@chmod 0755 dist/arch-pkg/usr/bin/oojq-uninstall
 	@printf "pkgname = oojq\npkgbase = oojq\npkgver = $(VERSION)-1\npkgdesc = Capability-bounded jq replacement with stdio MCP\nurl = https://github.com/openOODA-tools/oojq\nbuilddate = $$(date +%s)\npackager = openOODA-tools <ops@openooda.org>\nsize = $$(stat -c %s $(BIN))\narch = x86_64\nlicense = Apache-2.0\ndepend = glibc\nprovides = oojq\n" > dist/arch-pkg/.PKGINFO
 	@tar --zstd -cf dist/oojq-$(VERSION)-1-x86_64.pkg.tar.zst -C dist/arch-pkg .PKGINFO usr
 	@rm -rf dist/arch-pkg
-	@echo "built dist/oojq-$(VERSION)-1-x86_64.pkg.tar.zst"
+	@bash -n packaging/arch/PKGBUILD
+	@cp packaging/arch/PKGBUILD packaging/PKGBUILD
+	@echo "built dist/oojq-$(VERSION)-1-x86_64.pkg.tar.zst and validated PKGBUILD"
 
 package: package-deb package-rpm package-arch
 

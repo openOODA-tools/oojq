@@ -1,7 +1,7 @@
 # Maintainer: openOODA-tools <ops@openooda.org>
 pkgname=oojq-bin
 _pkgname=oojq
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Capability-bounded jq replacement with stdio MCP"
 arch=('x86_64')

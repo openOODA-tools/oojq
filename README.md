@@ -739,10 +739,10 @@ Install directly from the sovereign release channel or download the RPM package:
 
 ```bash
 # Direct remote install via DNF
-sudo dnf install https://github.com/openOODA-tools/oojq/releases/download/v0.1.0/oojq-0.1.0-1.x86_64.rpm
+sudo dnf install https://github.com/openOODA-tools/oojq/releases/download/v0.1.1/oojq-0.1.1-1.x86_64.rpm
 
 # Or download and install locally
-sudo dnf install ./oojq-0.1.0-1.*.rpm
+sudo dnf install ./oojq-0.1.1-1.*.rpm
 ```
 
 ### APT / DEB (Debian, Ubuntu, Linux Mint, Pop!_OS)
@@ -750,8 +750,8 @@ Download and install the Debian binary package via APT:
 
 ```bash
 # Fetch and install via APT
-curl -fsSLO https://github.com/openOODA-tools/oojq/releases/download/v0.1.0/oojq_0.1.0-1_amd64.deb
-sudo apt install ./oojq_0.1.0-1_amd64.deb
+curl -fsSLO https://github.com/openOODA-tools/oojq/releases/download/v0.1.1/oojq_0.1.1-1_amd64.deb
+sudo apt install ./oojq_0.1.1-1_amd64.deb
 ```
 
 ### PKGBUILD (Arch Linux, Manjaro, EndeavourOS, SteamOS)
@@ -768,7 +768,7 @@ curl -fsSL https://openooda-tools.github.io/oojq/PKGBUILD -O
 makepkg -si
 
 # Option C: Prebuilt Pacman package
-sudo pacman -U https://github.com/openOODA-tools/oojq/releases/download/v0.1.0/oojq-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U https://github.com/openOODA-tools/oojq/releases/download/v0.1.1/oojq-0.1.1-1-x86_64.pkg.tar.zst
 ```
 
 ### Clean Uninstallation
