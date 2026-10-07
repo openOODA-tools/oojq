@@ -1664,7 +1664,7 @@ uninstall:
 	@rm -rf $(HOME)/.cache/oojq $(HOME)/.config/oojq
 	@echo "uninstalled oojq"
 
-VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.1.0)
+VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.1.1)
 
 package-deb: $(BIN)
 	@mkdir -p dist/deb-root/DEBIAN dist/deb-root/usr/bin

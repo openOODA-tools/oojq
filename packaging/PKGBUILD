@@ -10,8 +10,10 @@ license=('Apache-2.0')
 depends=('glibc')
 provides=('oojq')
 conflicts=('oojq')
-source=("${_pkgname}-${pkgver}::https://github.com/openOODA-tools/oojq/releases/download/v${pkgver}/oojq-linux-x86_64")
-sha256sums=('0b592553086cb713b5456a90faeeee7f5dc1a5a389751630c853ac89e44df10b')
+source=("${_pkgname}-${pkgver}::https://github.com/openOODA-tools/oojq/releases/download/v${pkgver}/oojq-linux-x86_64"
+        "uninstall.sh::https://raw.githubusercontent.com/openOODA-tools/${_pkgname}/v${pkgver}/uninstall.sh")
+sha256sums=('SKIP'
+            'SKIP')
 
 package() {
     install -Dm755 "${srcdir}/${_pkgname}-${pkgver}" "${pkgdir}/usr/bin/oojq"
