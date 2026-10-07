@@ -67,15 +67,42 @@ All openOODA tools synchronize visual presentation through `oote`:
 
 ---
 
-## 5. Native systemd Citizenship & Linux Integration
+## 5. System Architecture: systemd & Tri-Distribution Compliance (Arch, Fedora, Debian)
 
-This server follows a pure systemd-native architectural pattern:
+All openOODA utilities adhere to a sovereign Linux architecture encompassing pure systemd citizenship and multi-distribution packaging parity across Arch Linux, Fedora, and Debian:
 
-1. **System Services & Unit Placement**: Services managed in `/etc/systemd/system/`. Prefer drop-in overrides (`/etc/systemd/system/<unit>.service.d/*.conf`).
-2. **Declarative State & Provisioning**: Accounts declared via `systemd-sysusers` in `/etc/sysusers.d/*.conf`; directory lifecycle via `systemd-tmpfiles` in `/etc/tmpfiles.d/*.conf`.
-3. **Service Confinement & Hardening**: Use native sandboxing (`ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`, `NoNewPrivileges=`).
-4. **Logging & Schedulers**: Logging handled exclusively by `systemd-journald`. Scheduled tasks executed via `systemd.timer` units rather than legacy cron.
-5. **Standard System Directories**: Use `$RUNTIME_DIRECTORY` (`/run/openooda`), `$STATE_DIRECTORY` (`/var/lib/openooda`), `$CONFIGURATION_DIRECTORY` (`/etc/openooda`).
+1. **Pure systemd-Native Citizenship**:
+   - Manage services natively in `/etc/systemd/system/` (or `~/.config/systemd/user/` for user sessions).
+   - Prefer drop-in overrides (`/etc/systemd/system/<unit>.service.d/*.conf`) for system/packaged units.
+   - Declarative system accounts via `systemd-sysusers` in `/etc/sysusers.d/*.conf`.
+   - Declarative directory ownership, permissions, and lifecycle rules via `systemd-tmpfiles` in `/etc/tmpfiles.d/*.conf`.
+   - Service confinement and hardening via native directives (`ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=true`, `NoNewPrivileges=true`).
+   - Logging handled exclusively by `systemd-journald`. Scheduled tasks executed via `systemd.timer` units rather than legacy cron.
+   - Standard system directories: `$RUNTIME_DIRECTORY` (`/run/openooda`), `$STATE_DIRECTORY` (`/var/lib/openooda`), `$CONFIGURATION_DIRECTORY` (`/etc/openooda`).
+
+2. **Arch Linux Compliance (`pacman` / `makepkg`)**:
+   - Upstream packaging maintained under `packaging/PKGBUILD` and `packaging/arch/PKGBUILD`.
+   - Complies with Arch Packaging Standards: explicit metadata (`pkgname`, `pkgver`, `pkgrel`, `arch=('x86_64')`, `license=('Apache-2.0')`, `depends=('glibc')`).
+   - Packages both `/usr/bin/oojq` and companion uninstaller `/usr/bin/oojq-uninstall` with mode `0755`.
+   - Produces standard `.pkg.tar.zst` packages via `makepkg` or standard GNU `tar --zstd` with valid `.PKGINFO`.
+
+3. **Fedora / RHEL Compliance (`dnf` / `rpmbuild`)**:
+   - Spec files maintained under `packaging/oojq.spec`.
+   - Complies with Fedora Packaging Guidelines: standard macros (`%{buildroot}`, `%{?dist}`, `%{SOURCE0}`), BuildArch `x86_64`, License `Apache-2.0`.
+   - Packages both `/usr/bin/oojq` and `/usr/bin/oojq-uninstall` with explicit file ownership and changelog formatting.
+   - Generates native RPM packages (`.rpm`) compatible with DNF and RPM.
+
+4. **Debian / Ubuntu Compliance (`apt` / `dpkg-deb`)**:
+   - Source packaging maintained under `packaging/debian/` (`control`, `changelog`, `copyright`, `rules`, `control.binary`).
+   - Complies with Debian Policy: Section `utils`, Priority `optional`, Architecture `amd64`.
+   - Installs both `oojq` and `oojq-uninstall` to `/usr/bin/` with mode `0755`.
+   - Generates native Debian packages (`.deb`) compatible with APT and dpkg.
+
+5. **Universal Installation & Clean Relinquishment**:
+   - Universal `install.sh` must support distribution auto-detection and flags: `--dnf`, `--deb`, `--arch`/`--pacman`, `--dry-run`, and `--uninstall`.
+   - Standalone binaries install to `/usr/local/bin` (or `~/.local/bin` for unprivileged installs).
+   - Dedicated uninstaller `uninstall.sh` and companion CLI `oojq-uninstall` guarantee zero host residue upon removal.
+
 6. **Exit Code Contract**: Strict jq parity:
    - `0`: Valid JSON parsed and transformed without errors.
    - `1`: Compile error or filter evaluation exception.
