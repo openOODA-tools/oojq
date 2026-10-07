@@ -82,6 +82,10 @@ pub fn resolve_json_theme(fs: &FsReadCap, env: &EnvCap) -> String {
         let env_w: Result[String, String] = env_get(env, "OODA_FS_WRITEDIR");
         home = match env_w { Ok(s) => s, Err(_) => "" };
     }
+    if home == "" {
+        let env_h: Result[String, String] = env_get(env, "HOME");
+        home = match env_h { Ok(s) => s, Err(_) => "" };
+    }
     let p: String = theme_config_path(home);
     let r: Result[String, String] = read_file(fs, p);
     if r.is_err() { return "auto"; }

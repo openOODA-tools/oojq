@@ -15,4 +15,5 @@ sha256sums=('0b592553086cb713b5456a90faeeee7f5dc1a5a389751630c853ac89e44df10b')
 
 package() {
     install -Dm755 "${srcdir}/${_pkgname}-${pkgver}" "${pkgdir}/usr/bin/oojq"
+    install -Dm755 uninstall.sh "${pkgdir}/usr/bin/oojq-uninstall"
 }

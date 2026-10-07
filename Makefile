@@ -1,4 +1,4 @@
-# oojq v0.0.1 Makefile
+# oojq v0.1.1 Makefile
 #
 # Build, the verification gate, and the three oracles that check the answers:
 # test (1036 assertions), parity (byte-compare against the installed jq), and
@@ -1655,7 +1655,9 @@ install: build
 	@mkdir -p $(HOME)/.openooda/bin
 	cp -a $(BIN) $(HOME)/.openooda/bin/oojq
 	@chmod +x $(HOME)/.openooda/bin/oojq
-	@echo "installed $(HOME)/.openooda/bin/oojq"
+	cp -a uninstall.sh $(HOME)/.openooda/bin/oojq-uninstall
+	@chmod +x $(HOME)/.openooda/bin/oojq-uninstall
+	@echo "installed $(HOME)/.openooda/bin/oojq and oojq-uninstall"
 
 uninstall:
 	@rm -f $(HOME)/.openooda/bin/oojq /usr/local/bin/oojq $(HOME)/.local/bin/oojq /usr/bin/oojq $(HOME)/.openooda/bin/oojq-uninstall /usr/local/bin/oojq-uninstall $(HOME)/.local/bin/oojq-uninstall /usr/bin/oojq-uninstall
