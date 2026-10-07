@@ -152,7 +152,7 @@ INSTALL_ARCH=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY_RUN=1; shift ;;
-        --uninstall) DO_UNINSTALL=1; shift ;;
+        --uninstall|--remove) DO_UNINSTALL=1; shift ;;
         --verify) DO_VERIFY=1; shift ;;
         --prefix) CUSTOM_PREFIX="$2"; shift 2 ;;
         --deb|--apt) INSTALL_DEB=1; shift ;;
@@ -169,13 +169,17 @@ while [ $# -gt 0 ]; do
             say "    ${CYAN}--pkgbuild, --arch${RESET} Download and install Arch Linux package via makepkg"
             say "    ${CYAN}--dry-run${RESET}          Simulate deployment without modifying host"
             say "    ${CYAN}--verify${RESET}           Verify cryptographic SHA-256 seal and exit"
-            say "    ${CYAN}--uninstall${RESET}        Cleanly remove oojq binary and packages from system"
+            say "    ${CYAN}--uninstall, --remove${RESET} Cleanly remove oojq binary, uninstaller, packages, and caches"
             say "    ${CYAN}-h, --help${RESET}         Display this manual"
             say ""
             say "  ${BOLD}Direct Package Manager Invocations:${RESET}"
             say "    ${CYAN}DNF:${RESET}      curl -fsSL ${CANONICAL_URL}/install.sh | bash -s -- --dnf"
             say "    ${CYAN}APT:${RESET}      curl -fsSL ${CANONICAL_URL}/install.sh | bash -s -- --deb"
             say "    ${CYAN}PKGBUILD:${RESET} curl -fsSL ${CANONICAL_URL}/install.sh | bash -s -- --pkgbuild"
+            say ""
+            say "  ${BOLD}Clean Uninstallation:${RESET}"
+            say "    ${CYAN}Uninstall:${RESET} curl -fsSL ${CANONICAL_URL}/install.sh | bash -s -- --uninstall"
+            say "    ${CYAN}Local:${RESET}     oojq-uninstall (if installed)"
             say ""
             exit 0
             ;;
@@ -191,8 +195,11 @@ pause 0.3
 if [ "$DO_UNINSTALL" -eq 1 ]; then
     step "Relinquishing oojq"
     if [ "$DRY_RUN" -eq 1 ]; then
-        dim "Would remove oojq binary or packages"
-        ok "Simulation complete."
+        dim "Would check package manager registrations (dpkg, rpm, pacman)"
+        dim "Would remove binaries (/usr/local/bin/oojq, ~/.local/bin/oojq, /usr/bin/oojq)"
+        dim "Would remove companion uninstaller (oojq-uninstall)"
+        dim "Would purge cache and configuration directories (~/.cache/oojq, ~/.config/oojq)"
+        ok "Simulation complete. No host modifications made."
         exit 0
     fi
     if command -v dpkg >/dev/null 2>&1 && dpkg -s oojq >/dev/null 2>&1; then
@@ -209,19 +216,29 @@ if [ "$DO_UNINSTALL" -eq 1 ]; then
         ok "Removed oojq Arch package"
     fi
     FOUND=0
-    for p in /usr/local/bin/oojq "${HOME}/.local/bin/oojq" "${HOME}/.openooda/bin/oojq" /usr/bin/oojq; do
+    for p in /usr/local/bin/oojq "${HOME}/.local/bin/oojq" "${HOME}/.openooda/bin/oojq" /usr/bin/oojq \
+             /usr/local/bin/oojq-uninstall "${HOME}/.local/bin/oojq-uninstall" "${HOME}/.openooda/bin/oojq-uninstall" /usr/bin/oojq-uninstall; do
         if [ -f "$p" ]; then
             rm -f "$p" 2>/dev/null || sudo rm -f "$p"
             ok "Banished ${BOLD}$p${RESET}"
             FOUND=1
         fi
     done
+    for c in "${HOME}/.cache/oojq" "${HOME}/.config/oojq"; do
+        if [ -d "$c" ]; then
+            rm -rf "$c" 2>/dev/null || sudo rm -rf "$c" 2>/dev/null || true
+            ok "Purged cache ${BOLD}$c${RESET}"
+        fi
+    done
     if [ "$FOUND" -eq 0 ]; then
-        warn "No existing oojq binary detected in standard search paths."
+        warn "No existing oojq installation detected in standard search paths."
+    else
+        ok "Clean uninstallation complete."
     fi
     say ""
     exit 0
 fi
+
 
 # --- DEB / APT Installation ---
 if [ "$INSTALL_DEB" -eq 1 ]; then
@@ -438,6 +455,139 @@ else
 fi
 ok "Binary situated at ${BOLD}${INSTALL_DIR}/oojq${RESET}"
 
+story_line "Equipping clean uninstaller at ${INSTALL_DIR}/oojq-uninstall…"
+cat << 'EOF_UNINSTALL' > "${TMP_DIR}/oojq-uninstall"
+#!/bin/sh
+# oojq Clean Uninstaller
+set -eu
+
+DRY_RUN=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help)
+            echo "Usage: oojq-uninstall [--dry-run]"
+            echo "Cleanly removes oojq binaries, package manager registrations, and caches."
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ -t 1 ] && [ "${NO_COLOR:-}" = "" ]; then
+    CYAN="\033[38;5;51m"
+    GREEN="\033[38;5;82m"
+    YELLOW="\033[38;5;220m"
+    DIM="\033[38;5;242m"
+    BOLD="\033[1m"
+    RESET="\033[0m"
+else
+    CYAN="" GREEN="" YELLOW="" DIM="" BOLD="" RESET=""
+fi
+
+say()  { printf '%b\n' "$*"; }
+ok()   { say "  ${GREEN}✔${RESET} $*"; }
+warn() { say "  ${YELLOW}!${RESET} $*"; }
+step() { say ""; say " ${CYAN}${BOLD}$*${RESET}"; }
+
+step "Relinquishing oojq"
+
+# Check packages
+if command -v dpkg >/dev/null 2>&1 && dpkg -s oojq >/dev/null 2>&1; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "  ${DIM}[dry-run] Would remove oojq Debian package${RESET}"
+    else
+        sudo apt-get remove -y oojq 2>/dev/null || sudo dpkg -r oojq 2>/dev/null || true
+        ok "Removed oojq Debian package"
+    fi
+elif command -v rpm >/dev/null 2>&1 && rpm -q oojq >/dev/null 2>&1; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "  ${DIM}[dry-run] Would remove oojq RPM package${RESET}"
+    else
+        sudo dnf remove -y oojq 2>/dev/null || sudo rpm -e oojq 2>/dev/null || true
+        ok "Removed oojq RPM package"
+    fi
+elif command -v pacman >/dev/null 2>&1 && pacman -Q oojq >/dev/null 2>&1; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "  ${DIM}[dry-run] Would remove oojq Arch package${RESET}"
+    else
+        sudo pacman -R --noconfirm oojq 2>/dev/null || true
+        ok "Removed oojq Arch package"
+    fi
+elif command -v pacman >/dev/null 2>&1 && pacman -Q oojq-bin >/dev/null 2>&1; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        say "  ${DIM}[dry-run] Would remove oojq-bin Arch package${RESET}"
+    else
+        sudo pacman -R --noconfirm oojq-bin 2>/dev/null || true
+        ok "Removed oojq Arch package"
+    fi
+fi
+
+# Remove binaries
+FOUND=0
+for p in /usr/local/bin/oojq "${HOME}/.local/bin/oojq" "${HOME}/.openooda/bin/oojq" /usr/bin/oojq; do
+    if [ -f "$p" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            say "  ${DIM}[dry-run] Would remove $p${RESET}"
+        else
+            rm -f "$p" 2>/dev/null || sudo rm -f "$p" 2>/dev/null || true
+            ok "Banished ${BOLD}$p${RESET}"
+        fi
+        FOUND=1
+    fi
+done
+
+# Clean caches & runtime files
+for c in "${HOME}/.cache/oojq" "${HOME}/.config/oojq"; do
+    if [ -d "$c" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            say "  ${DIM}[dry-run] Would remove cache directory $c${RESET}"
+        else
+            rm -rf "$c" 2>/dev/null || sudo rm -rf "$c" 2>/dev/null || true
+            ok "Cleaned $c"
+        fi
+    fi
+done
+
+if [ "$FOUND" -eq 0 ]; then
+    warn "No oojq binary found in standard paths."
+fi
+
+# Self-removal
+THIS="$0"
+case "$THIS" in
+    /*) SELF="$THIS" ;;
+    *)  SELF="$(pwd)/$THIS" ;;
+esac
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    say "  ${DIM}[dry-run] Would remove uninstaller $SELF${RESET}"
+    say ""
+    ok "Simulation complete. No host modifications made."
+    exit 0
+fi
+
+for u in "$SELF" /usr/local/bin/oojq-uninstall "${HOME}/.local/bin/oojq-uninstall" "${HOME}/.openooda/bin/oojq-uninstall" /usr/bin/oojq-uninstall; do
+    if [ -f "$u" ]; then
+        rm -f "$u" 2>/dev/null || sudo rm -f "$u" 2>/dev/null || true
+    fi
+done
+
+say ""
+ok "oojq and all related components cleanly uninstalled."
+EOF_UNINSTALL
+chmod +x "${TMP_DIR}/oojq-uninstall"
+if [ -w "$INSTALL_DIR" ]; then
+    mv "${TMP_DIR}/oojq-uninstall" "${INSTALL_DIR}/oojq-uninstall"
+else
+    sudo mv "${TMP_DIR}/oojq-uninstall" "${INSTALL_DIR}/oojq-uninstall"
+fi
+ok "Clean uninstaller situated at ${BOLD}${INSTALL_DIR}/oojq-uninstall${RESET}"
+
 if "${INSTALL_DIR}/oojq" --version >/dev/null 2>&1; then
     VER_PROVE=$("${INSTALL_DIR}/oojq" --version)
     ok "Living proof: ${GREEN}${BOLD}${VER_PROVE}${RESET}"
@@ -461,6 +611,11 @@ say "    oojq . package.json"
 say "    oojq -c '.items[] | {id, name}' data.json"
 say "    oojq --mcp"
 say ""
+say "  ${BOLD}Clean uninstaller:${RESET}"
+say "    ${INSTALL_DIR}/oojq-uninstall"
+say "    ${DIM}or:${RESET} curl -fsSL ${CANONICAL_URL}/install.sh | bash -s -- --uninstall"
+say ""
 say "  ${DIM}Canonical portal:${RESET} ${CANONICAL_URL}"
 say "  ${DIM}Source registry:${RESET}  ${GITHUB_URL}"
 say ""
+

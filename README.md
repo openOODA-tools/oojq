@@ -771,6 +771,25 @@ makepkg -si
 sudo pacman -U https://github.com/openOODA-tools/oojq/releases/download/v0.1.0/oojq-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
+### Clean Uninstallation
+`oojq` can be cleanly and completely uninstalled at any time without leaving stray files or broken registrations:
+
+```bash
+# Method 1: Using the companion uninstaller deployed with oojq
+oojq-uninstall
+
+# Method 2: Via the Universal Web Uninstaller
+curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash -s -- --uninstall
+
+# Method 3: From source repository
+make uninstall
+
+# Method 4: Via native package managers
+sudo dnf remove oojq        # Fedora / RHEL
+sudo apt remove oojq        # Debian / Ubuntu
+sudo pacman -R oojq-bin     # Arch Linux
+```
+
 ### Installer Options
 ```bash
 # Preview actions without modifying the host
@@ -782,8 +801,8 @@ curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash -s -- --verif
 # Custom installation prefix
 curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash -s -- --prefix ~/.local/bin
 
-# Clean uninstall
-curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash -s -- --uninstall
+# Simulate clean uninstallation
+curl -fsSL https://openooda-tools.github.io/oojq/install.sh | bash -s -- --uninstall --dry-run
 ```
 
 ### Source Build & Verification
@@ -794,7 +813,10 @@ make test        # 1036 behavioural assertions against the built binary
 make parity      # byte-compare every filter against the real jq
 make verify      # line-cap, file-law, academy, density, suggest-audit, dead-tests, dup-names, check
 make package     # build .deb, .rpm, and .pkg.tar.zst packages
+make install     # install binary to ~/.openooda/bin/oojq
+make uninstall   # cleanly remove installed binary, companion uninstaller, and caches
 ```
+
 
 
 `make parity` runs the same filters through the installed `jq` and through

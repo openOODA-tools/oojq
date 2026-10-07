@@ -28,7 +28,7 @@ BIN := dist/oojq
 # ten pages, and a page missing from it meant an edit to it did not rebuild.
 SRC := $(shell find . -name '*.oo' -not -path './dist/*' -not -path './.ooda-cache/*' | sed 's|^\./||' | sort)
 
-.PHONY: all build check line-cap file-law academy density suggest-audit dead-tests dup-names test parity sweep coverage verify install package-deb package-rpm package-arch package clean
+.PHONY: all build check line-cap file-law academy density suggest-audit dead-tests dup-names test parity sweep coverage verify install uninstall package-deb package-rpm package-arch package clean
 
 all: build verify test
 
@@ -1656,6 +1656,11 @@ install: build
 	cp -a $(BIN) $(HOME)/.openooda/bin/oojq
 	@chmod +x $(HOME)/.openooda/bin/oojq
 	@echo "installed $(HOME)/.openooda/bin/oojq"
+
+uninstall:
+	@rm -f $(HOME)/.openooda/bin/oojq /usr/local/bin/oojq $(HOME)/.local/bin/oojq /usr/bin/oojq $(HOME)/.openooda/bin/oojq-uninstall /usr/local/bin/oojq-uninstall $(HOME)/.local/bin/oojq-uninstall /usr/bin/oojq-uninstall
+	@rm -rf $(HOME)/.cache/oojq $(HOME)/.config/oojq
+	@echo "uninstalled oojq"
 
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.1.0)
 
