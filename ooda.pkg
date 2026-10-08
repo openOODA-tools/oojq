@@ -1,0 +1,9 @@
+name=oojq
+version=0.3.0
+deps=
+caps=FsRead,Mcp
+license=Apache-2.0
+payload=main.oo
+commit=
+sha256=
+sig=
