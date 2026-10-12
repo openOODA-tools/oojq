@@ -137,3 +137,17 @@ Before any commit or release is certified, the entire codebase must pass the aut
 6. **`make parity`**: Byte-for-byte evaluation parity against jq test suites.
 7. **`make test`**: 1,000+ behavioural tests across filter expressions, JSON parsing, and MCP stdio handling.
 8. **Double-Run Determinism**: All verification runs execute twice sequentially in fresh processes ($Run_1 == Run_2$).
+
+---
+
+## 7. Multi-Engine Audit Protocol (Pre-Release)
+
+Advisory tiered audit run before tagging releases, budgeted by token capacity:
+1. **`mcode`** (Abundant tokens): Full codebase scan for contract mismatches, packaging specs, and CI gates.  
+   `mcode exec --permission full "<prompt>"`
+2. **`vibe`** (Moderate tokens): Adversarial diff inspection for subtle regressions, security bypasses, and API validity.  
+   `vibe -p "<prompt>" --trust --auto-approve`
+3. **`grok`** (Strict quota): High-value referee and final sanity check on critical release diffs.  
+   `grok -p "<prompt>" --always-approve`
+
+**Rule:** External audits are strictly advisory; all findings must be verified against source code. External LLMs never gate CI—the §5 Verification Ladder is the sole canonical authority.
